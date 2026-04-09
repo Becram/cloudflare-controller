@@ -1,0 +1,226 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.apps.rector.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: apps.rector.io
+  names:
+    kind: Application
+    listKind: ApplicationList
+    plural: applications
+    singular: application
+    shortNames:
+      - app
+    categories:
+      - all
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Available
+          type: integer
+          jsonPath: .status.availableReplicas
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - image
+                - port
+              properties:
+                image:
+                  type: string
+                replicas:
+                  type: integer
+                  format: int32
+                  default: 1
+                  minimum: 0
+                port:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 65535
+                serviceType:
+                  type: string
+                  default: ClusterIP
+                  enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                env:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+                      valueFrom:
+                        type: object
+                        properties:
+                          configMapKeyRef:
+                            type: object
+                            required:
+                              - key
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                              optional:
+                                type: boolean
+                          fieldRef:
+                            type: object
+                            required:
+                              - fieldPath
+                            properties:
+                              apiVersion:
+                                type: string
+                              fieldPath:
+                                type: string
+                          resourceFieldRef:
+                            type: object
+                            required:
+                              - resource
+                            properties:
+                              containerName:
+                                type: string
+                              divisor:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                type: string
+                          secretKeyRef:
+                            type: object
+                            required:
+                              - key
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                              optional:
+                                type: boolean
+                serviceAnnotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Annotations applied to the managed Service object.
+                tolerations:
+                  type: array
+                  description: Tolerations applied to pods, allowing scheduling on nodes with matching taints.
+                  items:
+                    type: object
+                    properties:
+                      key:
+                        type: string
+                      operator:
+                        type: string
+                        enum:
+                          - Exists
+                          - Equal
+                      value:
+                        type: string
+                      effect:
+                        type: string
+                        enum:
+                          - NoSchedule
+                          - PreferNoSchedule
+                          - NoExecute
+                      tolerationSeconds:
+                        type: integer
+                        format: int64
+                resources:
+                  type: object
+                  properties:
+                    limits:
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      type: object
+                    requests:
+                      additionalProperties:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      type: object
+            status:
+              type: object
+              properties:
+                availableReplicas:
+                  type: integer
+                  format: int32
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+                        maxLength: 32768
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      type:
+                        type: string
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
