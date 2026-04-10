@@ -1,6 +1,6 @@
-# Rector — Kubernetes Application Controller
+# Rector — Cloudflare Argo Tunnel Controller
 
-Rector is a Kubernetes controller that introduces an `Application` Custom Resource Definition (CRD). Each `Application` CR represents a containerised workload: the controller reconciles it into a `Deployment` and a `Service` in the same namespace, keeping them in sync with the desired spec and reporting availability back through status conditions.
+Rector is a Kubernetes controller that watches `Service` objects annotated with `cloudflare.rector.io/hostname` and automatically manages the corresponding Cloudflare resources: a DNS CNAME record, a cloudflared ingress rule in a ConfigMap, and (optionally) a Cloudflare Zero Trust Access Application.
 
 ---
 
@@ -9,16 +9,14 @@ Rector is a Kubernetes controller that introduces an `Application` Custom Resour
 1. [Prerequisites](#prerequisites)
 2. [Project Structure](#project-structure)
 3. [Architecture](#architecture)
-4. [CRD Spec Reference](#crd-spec-reference)
+4. [Service Annotations](#service-annotations)
 5. [Reconcile Loop](#reconcile-loop)
-6. [Status and Conditions](#status-and-conditions)
+6. [Configuration](#configuration)
 7. [Build and Test](#build-and-test)
 8. [Deploy to a Cluster](#deploy-to-a-cluster)
 9. [Run Locally](#run-locally)
-10. [Creating an Application CR](#creating-an-application-cr)
+10. [Usage Example](#usage-example)
 11. [Observing the Controller](#observing-the-controller)
-12. [Code Generation](#code-generation)
-13. [Manager Flags](#manager-flags)
 
 ---
 
@@ -27,12 +25,14 @@ Rector is a Kubernetes controller that introduces an `Application` Custom Resour
 | Tool | Version | Purpose |
 |---|---|---|
 | Go | 1.22.5 | Build the manager binary |
-| kubectl | 1.27+ | Apply CRDs and sample CRs |
-| controller-gen | v0.14.0 | Regenerate CRD manifests and deepcopy (invoked via `go run`, no global install needed) |
+| kubectl | 1.27+ | Apply RBAC and run the controller |
 | Docker | any | Build the controller image |
 | kind / minikube | any | Local cluster for development |
+| cloudflared | any | Running Argo Tunnel in-cluster |
 
 The controller targets Kubernetes API version **1.29** (`k8s.io/*` at `v0.29.15`, `controller-runtime` at `v0.17.6`).
+
+A Cloudflare account with an existing **Argo Tunnel** (cloudflared) is required. The controller does not create the tunnel itself — it manages DNS records, ConfigMap ingress rules, and Access Applications on top of an existing tunnel.
 
 ---
 
@@ -40,21 +40,23 @@ The controller targets Kubernetes API version **1.29** (`k8s.io/*` at `v0.29.15`
 
 ```
 rector/
-├── api/v1alpha1/
-│   ├── application_types.go        # ApplicationSpec, ApplicationStatus, kubebuilder markers
-│   ├── groupversion_info.go        # Group: apps.rector.io, Version: v1alpha1
-│   └── zz_generated.deepcopy.go   # Generated — do not edit
-├── internal/controller/
-│   └── application_controller.go  # Reconciler: Deployment + Service + status
+├── internal/
+│   ├── cloudflare/
+│   │   └── client.go          # Cloudflare API client interface + cloudflare-go implementation
+│   ├── configmap/
+│   │   └── manager.go         # cloudflared ConfigMap ingress upsert/remove with retry-on-conflict
+│   ├── config/
+│   │   └── config.go          # YAML config loader + validator
+│   └── controller/
+│       └── service_controller.go  # ServiceReconciler: DNS + ConfigMap + Access App
 ├── cmd/
-│   └── main.go                    # Manager bootstrap, scheme registration, probes
+│   └── main.go                # Manager bootstrap, config loading, healthz/readyz probes
 ├── config/
-│   ├── crd/                       # CRD manifest (regenerate with `make manifests`)
-│   ├── rbac/role.yaml             # ClusterRole (regenerate with `make manifests`)
-│   └── samples/                   # Example Application CR
-├── hack/
-│   └── boilerplate.go.txt         # License header for generated files
-├── Dockerfile                     # Multi-stage build → distroless image
+│   ├── rbac/role.yaml         # ClusterRole for the controller
+│   └── samples/
+│       ├── controller-config.yaml  # Example controller config file
+│       └── annotated-service.yaml  # Example annotated Service
+├── Dockerfile
 ├── Makefile
 └── go.mod
 ```
@@ -63,180 +65,137 @@ rector/
 
 ## Architecture
 
-### Overview
-
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Kubernetes API Server                                   │
-│                                                          │
-│  Application CR  ──owns──►  Deployment                  │
-│  (apps.rector.io)  ──owns──►  Service                   │
-└─────────────────────────────────────────────────────────┘
-            ▲                        │
-            │  watch / reconcile     │ CreateOrUpdate
-            │                        ▼
-┌───────────────────────────────────────┐
-│  rector-controller (manager process)  │
-│                                       │
-│  ApplicationReconciler                │
-│    ├── reconcileDeployment()          │
-│    ├── reconcileService()             │
-│    └── updateConditions()             │
-└───────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│  Kubernetes cluster                                                │
+│                                                                   │
+│  Service (annotated)  ──watch──►  ServiceReconciler               │
+│                                        │                          │
+│                         ┌─────────────┼──────────────────┐        │
+│                         ▼             ▼                  ▼        │
+│                    Cloudflare    cloudflared         Cloudflare   │
+│                    DNS CNAME     ConfigMap           Zero Trust   │
+│                    record        ingress rule        Access App   │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                    Cloudflare API
+                    (cloudflare-go)
 ```
 
-### Ownership model
+### Lifecycle
 
-The controller sets an **owner reference** (`controller: true`) on both the `Deployment` and the `Service`, pointing back to the `Application` CR. This means:
+The controller adds a finalizer (`cloudflare.rector.io/finalizer`) to every annotated Service before making any external changes. On Service deletion or annotation removal, the reconciler cleans up all Cloudflare resources before removing the finalizer.
 
-- Deleting an `Application` CR cascades to delete its `Deployment` and `Service` automatically via Kubernetes garbage collection — no finalizers are needed.
-- Both owned resources must live in the **same namespace** as the `Application` (owner references do not cross namespaces).
+### ConfigMap management
 
-### Watch chain
-
-`SetupWithManager` registers three watches:
-
-```go
-ctrl.NewControllerManagedBy(mgr).
-    For(&appsv1alpha1.Application{}).      // primary watch
-    Owns(&appsv1.Deployment{}).            // re-enqueue parent on child change
-    Owns(&corev1.Service{}).               // re-enqueue parent on child change
-    Complete(r)
-```
-
-Any change to an owned `Deployment` or `Service` — whether made by the user, another controller, or a rollout — re-enqueues the parent `Application` for reconciliation. This is how the controller self-heals manual edits to owned resources.
-
-### Labels
-
-Every owned resource receives these labels, which also serve as the pod selector:
-
-```
-app.kubernetes.io/name:       <application-name>
-app.kubernetes.io/managed-by: rector-controller
-```
+The cloudflared `ConfigMap` (identified by `--cloudflared-configmap-name` / `--cloudflared-configmap-namespace`) stores a `config.yaml` key in cloudflared's format. The controller upserts or removes ingress rules within that YAML, preserving the mandatory catch-all (`http_status: 404`) as the last rule. Concurrent updates are handled with up to 3 retries on `409 Conflict`.
 
 ---
 
-## CRD Spec Reference
+## Service Annotations
 
-**Group:** `apps.rector.io`  
-**Version:** `v1alpha1`  
-**Kind:** `Application`  
-**Scope:** Namespaced  
-**Short name:** `app`  
-**Categories:** `all` (appears in `kubectl get all`)
+### Input annotations (set by you)
 
-### `spec` fields
-
-| Field | Type | Required | Default | Constraints | Description |
-|---|---|---|---|---|---|
-| `image` | `string` | Yes | — | — | Container image to deploy (e.g. `nginx:1.25-alpine`) |
-| `port` | `int32` | Yes | — | 1–65535 | Container port to expose; Service `port` and `targetPort` are both set to this value |
-| `replicas` | `*int32` | No | `1` | ≥ 0 | Desired pod count. Set to `0` to scale down without deleting the Application |
-| `serviceType` | `string` | No | `ClusterIP` | `ClusterIP`, `NodePort`, `LoadBalancer` | Kubernetes Service type |
-| `env` | `[]corev1.EnvVar` | No | — | — | Environment variables; supports `value`, `valueFrom.secretKeyRef`, `valueFrom.configMapKeyRef`, `valueFrom.fieldRef` |
-| `resources` | `corev1.ResourceRequirements` | No | — | — | Container resource `requests` and `limits` |
-| `serviceAnnotations` | `map[string]string` | No | — | — | Annotations applied to the managed `Service` object (e.g. Prometheus scrape hints, internal load-balancer flags) |
-| `tolerations` | `[]corev1.Toleration` | No | — | — | Tolerations added to the pod spec; allows pods to be scheduled on nodes carrying matching taints |
-
-### `status` fields
-
-| Field | Type | Description |
+| Annotation | Required | Description |
 |---|---|---|
-| `availableReplicas` | `int32` | Number of pods with a `Ready` condition, sourced from `Deployment.Status.AvailableReplicas` |
-| `conditions` | `[]metav1.Condition` | Standard Kubernetes condition list — see [Status and Conditions](#status-and-conditions) |
+| `cloudflare.rector.io/hostname` | Yes | Public hostname to expose (e.g. `app.example.com`). Presence triggers the controller. |
+| `cloudflare.rector.io/port` | No | Service port to use as the backend. Defaults to the first port in `spec.ports`. |
+| `cloudflare.rector.io/access-enabled` | No | Set to `"true"` to create a Cloudflare Zero Trust Access Application for this hostname. |
+
+### Status annotations (written by the controller)
+
+| Annotation | Description |
+|---|---|
+| `cloudflare.rector.io/dns-record-id` | Cloudflare DNS record ID for the CNAME (stored for cleanup). |
+| `cloudflare.rector.io/access-app-id` | Cloudflare Access Application ID (stored for cleanup). |
 
 ---
 
 ## Reconcile Loop
 
-The reconciler runs every time an `Application` CR changes, or every **30 seconds** as a background requeue (to catch drift from Deployment status updates).
-
 ```
 Reconcile(req)
     │
-    ├─ GET Application CR
-    │     └─ NotFound → return (object deleted, GC handles owned resources)
+    ├─ GET Service
+    │     └─ NotFound → return (already gone)
     │
-    ├─ Capture status patch base (MergeFrom snapshot before any mutations)
+    ├─ Deletion or hostname annotation removed?
+    │     └─ Has finalizer → cleanup() → remove finalizer → Update
     │
-    ├─ reconcileDeployment()
-    │     ├─ CreateOrUpdate Deployment with name = app.Name, namespace = app.Namespace
-    │     │     Spec: replicas, selector, pod template (image, port, env, resources, tolerations)
-    │     ├─ SetControllerReference → owner reference to Application
-    │     └─ Record Event on create or update
+    ├─ Add finalizer if absent → Update → re-enqueue
     │
-    ├─ reconcileService()
-    │     ├─ CreateOrUpdate Service with name = app.Name, namespace = app.Namespace
-    │     │     Annotations: app.Spec.ServiceAnnotations (fully replaced on each reconcile)
-    │     │     Spec: type, selector, port = targetPort = app.Spec.Port
-    │     │     ⚠ Preserves existing Spec.ClusterIP (immutable after creation)
-    │     ├─ SetControllerReference → owner reference to Application
-    │     └─ Record Event on create or update
+    ├─ reconcileDNS()
+    │     └─ EnsureDNSRecord: list existing CNAMEs → update if drifted, create if absent
+    │         Writes cloudflare.rector.io/dns-record-id annotation
     │
-    ├─ app.Status.AvailableReplicas = deploy.Status.AvailableReplicas
-    ├─ updateConditions()
+    ├─ ConfigMgr.UpsertIngress()
+    │     └─ Parse cloudflared config.yaml from ConfigMap → upsert rule → marshal back
+    │         Retries up to 3× on 409 Conflict
     │
-    ├─ defer: r.Status().Patch() → write status diff back to API server
-    │         (uses Status subresource — r.Update() on the main object will NOT persist status)
+    ├─ access-enabled == "true"?
+    │     └─ reconcileAccessApp()
+    │         Already has app-id → skip; else EnsureAccessApp → write annotation
     │
-    └─ return RequeueAfter: 30s
+    ├─ Patch Service annotations (MergeFrom — avoids clobbering other controllers)
+    │
+    └─ RequeueAfter: 5m
 ```
 
-### Why `CreateOrUpdate` and not `Apply`
+### Cleanup
 
-`controllerutil.CreateOrUpdate` fetches the current object, runs the mutate function to set desired fields, then issues a Create or Update call. It is idempotent and avoids field manager conflicts. The mutate function only sets fields the controller owns — it does not overwrite fields set by other controllers (e.g. `Spec.ClusterIP`, admission webhook annotations).
+```
+cleanup()
+    ├─ DeleteDNSRecord (if dns-record-id annotation present)
+    ├─ RemoveIngress from ConfigMap (if hostname annotation present)
+    └─ DeleteAccessApp (if access-app-id annotation present)
+```
 
 ---
 
-## Status and Conditions
+## Configuration
 
-The controller writes two conditions to `status.conditions` using `k8s.io/apimachinery/pkg/api/meta.SetStatusCondition`, which enforces the standard condition list contract (map keyed by `type`, `lastTransitionTime` only updated on actual state change).
+The controller is configured via a YAML file (`--config`) with individual flags that override file values. `CLOUDFLARE_API_TOKEN` must be provided as an environment variable — never in the config file.
 
-### `Available`
+### Config file (`config/samples/controller-config.yaml`)
 
-| State | Status | Reason | Message |
-|---|---|---|---|
-| `availableReplicas >= desiredReplicas` | `True` | `MinimumReplicasAvailable` | `N/N replicas available` |
-| `availableReplicas < desiredReplicas` | `False` | `MinimumReplicasUnavailable` | `N/M replicas available` |
+```yaml
+cloudflare:
+  accountID: "your-cloudflare-account-id"
+  zoneID:    "your-cloudflare-zone-id"
+  tunnelID:  "your-argo-tunnel-uuid"
 
-### `Progressing`
+cloudflared:
+  configMap:
+    name:      cloudflared-config
+    namespace: cloudflare-system
 
-| State | Status | Reason | Message |
-|---|---|---|---|
-| Rollout complete | `False` | `NewReplicaSetAvailable` | `Deployment has successfully rolled out` |
-| Rollout in progress | `True` | `ReplicaSetUpdated` | `Deployment is progressing` |
-
-### Reading conditions
-
-```bash
-kubectl get app my-app -o jsonpath='{.status.conditions}' | jq .
+# Optional — defaults shown
+metricsBindAddress:     ":8080"
+healthProbeBindAddress: ":8081"
+leaderElect:            false
 ```
 
-Example output:
+### Environment variable
 
-```json
-[
-  {
-    "type": "Available",
-    "status": "True",
-    "reason": "MinimumReplicasAvailable",
-    "message": "2/2 replicas available",
-    "lastTransitionTime": "2026-04-09T08:00:00Z",
-    "observedGeneration": 1
-  },
-  {
-    "type": "Progressing",
-    "status": "False",
-    "reason": "NewReplicaSetAvailable",
-    "message": "Deployment has successfully rolled out",
-    "lastTransitionTime": "2026-04-09T08:00:00Z",
-    "observedGeneration": 1
-  }
-]
-```
+| Variable | Required | Description |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | Yes | Cloudflare API token. Mount from a Kubernetes Secret. |
 
-`observedGeneration` matches `metadata.generation` when the status reflects the current spec. A mismatch means the controller has not yet reconciled the latest change.
+### Flags
+
+All flags override their corresponding config file value.
+
+| Flag | Description |
+|---|---|
+| `--config` | Path to the YAML config file |
+| `--cloudflare-account-id` | Cloudflare account ID |
+| `--cloudflare-zone-id` | Cloudflare DNS zone ID |
+| `--cloudflare-tunnel-id` | Argo Tunnel UUID |
+| `--cloudflared-configmap-name` | Name of the cloudflared ConfigMap |
+| `--cloudflared-configmap-namespace` | Namespace of the cloudflared ConfigMap |
+| `--metrics-bind-address` | Prometheus metrics endpoint (default `:8080`) |
+| `--health-probe-bind-address` | Health probe endpoint (default `:8081`) |
+| `--leader-elect` | Enable leader election |
 
 ---
 
@@ -249,8 +208,8 @@ make build
 # Run tests with race detector + coverage report
 make test
 
-# Run only a specific test
-go test -race -run TestApplicationReconciler ./internal/controller/...
+# Run a specific test
+go test -race -run TestReconcile ./internal/controller/...
 
 # Format only
 make fmt
@@ -259,34 +218,26 @@ make fmt
 make vet
 ```
 
-`make build` runs `generate`, `fmt`, and `vet` as prerequisites. Do not bypass them in CI.
-
 ---
 
 ## Deploy to a Cluster
 
-### 1. Install the CRD
-
-```bash
-make install
-# equivalent to: kubectl apply -f config/crd/
-```
-
-Verify:
-
-```bash
-kubectl get crd applications.apps.rector.io
-```
-
-### 2. Apply RBAC
+### 1. Apply RBAC
 
 ```bash
 kubectl apply -f config/rbac/role.yaml
 
-# Create the ClusterRoleBinding (adjust serviceaccount name/namespace as needed)
 kubectl create clusterrolebinding rector-manager-rolebinding \
   --clusterrole=rector-manager-role \
-  --serviceaccount=default:rector-controller
+  --serviceaccount=cloudflare-system:rector-controller
+```
+
+### 2. Create the API token Secret
+
+```bash
+kubectl create secret generic cloudflare-api-token \
+  --from-literal=CLOUDFLARE_API_TOKEN=<your-token> \
+  -n cloudflare-system
 ```
 
 ### 3. Build and push the image
@@ -298,14 +249,12 @@ docker push your-registry/rector-controller:v0.1.0
 
 ### 4. Deploy the manager
 
-Create a `Deployment` in your cluster that runs the manager image with appropriate ServiceAccount, resource limits, and the flags listed in [Manager Flags](#manager-flags). A minimal example:
-
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rector-controller-manager
-  namespace: default
+  namespace: cloudflare-system
 spec:
   replicas: 1
   selector:
@@ -321,7 +270,17 @@ spec:
         - name: manager
           image: your-registry/rector-controller:v0.1.0
           args:
-            - --leader-elect=true
+            - --config=/etc/rector/config.yaml
+          env:
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-api-token
+                  key: CLOUDFLARE_API_TOKEN
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rector
+              readOnly: true
           ports:
             - name: metrics
               containerPort: 8080
@@ -337,158 +296,54 @@ spec:
               path: /readyz
               port: 8081
             initialDelaySeconds: 5
-```
-
-### Remove the CRD
-
-```bash
-make uninstall
-# This deletes all Application CRs as well — all owned Deployments and Services will be GC'd.
+      volumes:
+        - name: config
+          configMap:
+            name: rector-controller-config
 ```
 
 ---
 
 ## Run Locally
 
-Runs the controller process on your machine against whatever cluster `kubectl` is currently pointing to. The CRD must already be installed.
-
 ```bash
-make install   # install CRD if not already present
-make run       # go run ./cmd/main.go
+export CLOUDFLARE_API_TOKEN=<your-token>
+make run -- --config=config/samples/controller-config.yaml
 ```
 
-The manager connects to the cluster via `$KUBECONFIG` or `~/.kube/config`. It does **not** run in-cluster, so leader election should be left disabled (the default) during local development.
+The manager connects via `$KUBECONFIG` / `~/.kube/config`. Disable leader election (the default) during local development.
 
 ---
 
-## Creating an Application CR
+## Usage Example
 
-### Minimal
+Annotate any Service to expose it through the Argo Tunnel:
 
 ```yaml
-apiVersion: apps.rector.io/v1alpha1
-kind: Application
+apiVersion: v1
+kind: Service
 metadata:
   name: my-app
   namespace: default
+  annotations:
+    cloudflare.rector.io/hostname: "my-app.example.com"
+    cloudflare.rector.io/port: "8080"          # optional; defaults to first port
+    cloudflare.rector.io/access-enabled: "true" # optional; creates Access Application
 spec:
-  image: nginx:1.25-alpine
-  port: 80
+  selector:
+    app: my-app
+  ports:
+    - port: 8080
+      targetPort: 8080
 ```
 
-This creates:
-- A `Deployment` named `my-app` with 1 replica (default), running `nginx:1.25-alpine` on port 80.
-- A `ClusterIP` `Service` named `my-app` exposing port 80.
+The controller will:
 
-### Full example
+1. Create a DNS CNAME record `my-app.example.com → <tunnelID>.cfargotunnel.com`
+2. Add an ingress rule to the cloudflared ConfigMap: `my-app.example.com → http://my-app.default.svc.cluster.local:8080`
+3. Create a Cloudflare Zero Trust Access Application for `my-app.example.com`
 
-```yaml
-apiVersion: apps.rector.io/v1alpha1
-kind: Application
-metadata:
-  name: my-app
-  namespace: default
-spec:
-  image: nginx:1.25-alpine
-  replicas: 2
-  port: 80
-  serviceType: ClusterIP
-  serviceAnnotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "80"
-  env:
-    - name: ENV
-      value: production
-    - name: DB_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          name: my-app-secrets
-          key: db-password
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 128Mi
-  tolerations:
-    - key: dedicated
-      operator: Equal
-      value: my-app
-      effect: NoSchedule
-```
-
-### Tolerations reference
-
-`tolerations[].operator` has two valid values:
-
-| Operator | Behaviour |
-|---|---|
-| `Equal` | Tolerate taints where `key`, `value`, and `effect` all match. `value` must be set. |
-| `Exists` | Tolerate any taint with a matching `key`, regardless of value. Omit `value`. Set `key: ""` with `Exists` to tolerate all taints on a node. |
-
-`tolerations[].effect` filters which taint effects are tolerated:
-
-| Effect | Description |
-|---|---|
-| `NoSchedule` | Pod will not be scheduled on the node unless it has a matching toleration |
-| `PreferNoSchedule` | Scheduler avoids placing the pod on the node but will if no alternatives exist |
-| `NoExecute` | Pod is evicted if already running; new pods are not scheduled. Set `tolerationSeconds` to evict after a delay |
-
-**Example — tolerate all taints on a node (use with caution):**
-```yaml
-tolerations:
-  - operator: Exists
-```
-
-**Example — stay on a tainted node for 60 s before eviction:**
-```yaml
-tolerations:
-  - key: node.kubernetes.io/not-ready
-    operator: Exists
-    effect: NoExecute
-    tolerationSeconds: 60
-```
-
-### Apply and verify
-
-```bash
-kubectl apply -f config/samples/apps_v1alpha1_application.yaml
-
-# Short name "app" works because of the `categories=all` and `shortName=app` markers
-kubectl get app
-# NAME     IMAGE               REPLICAS   AVAILABLE   AGE
-# my-app   nginx:1.25-alpine   2          2           30s
-
-# Inspect owned resources
-kubectl get deployment,svc -l app.kubernetes.io/name=my-app
-
-# Watch conditions
-kubectl get app my-app -o jsonpath='{.status.conditions}' | jq .
-
-# Events from the controller
-kubectl describe app my-app | grep -A 20 Events
-```
-
-### Scale
-
-```bash
-kubectl patch app my-app --type=merge -p '{"spec":{"replicas":5}}'
-```
-
-### Scale to zero
-
-```bash
-kubectl patch app my-app --type=merge -p '{"spec":{"replicas":0}}'
-# Deployment scales to 0; Service remains. Available condition → False.
-```
-
-### Delete
-
-```bash
-kubectl delete app my-app
-# Deployment and Service are GC'd automatically via owner references.
-```
+To stop managing: remove the `cloudflare.rector.io/hostname` annotation. The controller will delete the DNS record, remove the ingress rule, delete the Access Application, then remove the finalizer.
 
 ---
 
@@ -496,56 +351,27 @@ kubectl delete app my-app
 
 ### Kubernetes Events
 
-The controller emits events on the `Application` object for every reconcile action:
+Events are emitted on the `Service` object:
 
 | Reason | Type | Trigger |
 |---|---|---|
-| `DeploymentReconciled` | Normal | Deployment created or updated |
-| `ServiceReconciled` | Normal | Service created or updated |
-| `DeploymentFailed` | Warning | Error reconciling Deployment |
-| `ServiceFailed` | Warning | Error reconciling Service |
+| `DNSRecordCreated` | Normal | DNS CNAME record created or confirmed |
+| `AccessAppCreated` | Normal | Cloudflare Access Application created |
+| `DNSFailed` | Warning | Cloudflare DNS API error |
+| `ConfigMapFailed` | Warning | cloudflared ConfigMap update failed |
+| `AccessAppFailed` | Warning | Cloudflare Access API error |
 
 ```bash
-kubectl describe app my-app
+kubectl describe svc my-app
 ```
 
 ### Metrics
 
-The manager exposes Prometheus metrics on `:8080/metrics` (controller-runtime default metrics: reconcile duration, queue depth, errors).
+Prometheus metrics on `:8080/metrics` (controller-runtime defaults: reconcile duration, queue depth, error rate).
 
 ### Health probes
 
 | Endpoint | Port | Purpose |
 |---|---|---|
-| `/healthz` | 8081 | Liveness — always returns 200 once the manager is running |
-| `/readyz` | 8081 | Readiness — returns 200 once the manager is ready to serve |
-
----
-
-## Code Generation
-
-Re-run after any change to types or `+kubebuilder:` markers:
-
-```bash
-# Regenerate zz_generated.deepcopy.go
-make generate
-
-# Regenerate config/crd/ and config/rbac/role.yaml
-make manifests
-```
-
-`controller-gen` is invoked via `go run` at version `v0.14.0` — no global install required. Both commands must be re-run before committing marker changes. CI should validate that the generated files are not stale.
-
----
-
-## Manager Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--metrics-bind-address` | `:8080` | Address the Prometheus metrics endpoint binds to |
-| `--health-probe-bind-address` | `:8081` | Address the liveness/readiness probe endpoints bind to |
-| `--leader-elect` | `false` | Enable leader election (required when running multiple replicas) |
-| `--zap-log-level` | `info` | Log verbosity (`debug`, `info`, `error`) |
-| `--zap-devel` | `true` (in code) | Development mode logger (human-readable output). Set `false` for JSON logs in production |
-
-Leader election uses the ID `rector.apps.rector.io` and requires a `Lease` resource in the manager's namespace. Grant the manager ServiceAccount `leases` `get;list;watch;create;update;patch;delete` on `coordination.k8s.io` when `--leader-elect=true`.
+| `/healthz` | 8081 | Liveness — 200 once the manager is running |
+| `/readyz` | 8081 | Readiness — 200 once the manager is ready |

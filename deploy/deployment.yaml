@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rector-controller-manager
+  namespace: cloudflare-system
+  labels:
+    app: rector-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rector-controller-manager
+  template:
+    metadata:
+      labels:
+        app: rector-controller-manager
+    spec:
+      serviceAccountName: rector-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: rector-controller:latest
+          args:
+            - --config=/etc/rector/config.yaml
+          env:
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rector-cloudflare-token
+                  key: CLOUDFLARE_API_TOKEN
+          volumeMounts:
+            - name: controller-config
+              mountPath: /etc/rector
+              readOnly: true
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: controller-config
+          configMap:
+            name: rector-controller-config

@@ -5,13 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-make generate          # regenerate zz_generated.deepcopy.go via controller-gen
-make manifests         # regenerate config/crd/ and config/rbac/ from marker comments
-make build             # compile bin/manager (runs generate + fmt + vet first)
+make build             # compile bin/manager (runs fmt + vet first)
 make run               # run controller locally against current kubeconfig
 make test              # go test -race ./... with coverage report
-make install           # kubectl apply CRDs to current cluster
-make uninstall         # kubectl delete CRDs
 make docker-build      # build controller image (IMG=rector-controller:latest)
 ```
 
@@ -22,32 +18,35 @@ go test -race -run TestReconcile ./internal/controller/...
 
 ## Architecture
 
-**CRD group/version:** `apps.rector.io/v1alpha1`, kind `Application`
-
-The controller owns two child resources per `Application` CR: a `Deployment` and a `Service`. Both are created with `ctrl.SetControllerReference` so Kubernetes GC cascades on deletion — no finalizers needed.
+No custom CRDs. The controller watches standard `core/v1` **Services** for `cloudflare.rector.io/*` annotations and manages external Cloudflare resources in response.
 
 ```
-api/v1alpha1/
-  application_types.go      — ApplicationSpec / ApplicationStatus types + kubebuilder markers
-  groupversion_info.go       — SchemeBuilder registration (group: apps.rector.io)
-  zz_generated.deepcopy.go  — generated; do not edit (regenerate with `make generate`)
-
-internal/controller/
-  application_controller.go — reconcile loop: CreateOrUpdate Deployment + Service, patch status
+internal/
+  cloudflare/
+    client.go           — Client interface + cloudflare-go implementation
+                          (EnsureDNSRecord, DeleteDNSRecord, EnsureAccessApp, DeleteAccessApp)
+  configmap/
+    manager.go          — cloudflared ConfigMap ingress upsert/remove; retries on 409 Conflict
+  config/
+    config.go           — YAML config loader (Load) + validator (Validate)
+  controller/
+    service_controller.go — ServiceReconciler: DNS + ConfigMap + Access App lifecycle
 
 cmd/
-  main.go                   — manager bootstrap, scheme registration, healthz/readyz probes
+  main.go               — manager bootstrap: load config, read CLOUDFLARE_API_TOKEN env var,
+                          build cfc.Client, wire ServiceReconciler, start manager
 
 config/
-  crd/                      — CRD manifest (regenerate with `make manifests`)
-  rbac/role.yaml            — ClusterRole (regenerate with `make manifests`)
-  samples/                  — example Application CR
+  rbac/role.yaml        — ClusterRole for the controller
+  samples/
+    controller-config.yaml  — example config file
 ```
 
 ## Key implementation notes
 
-- **Status writes** use `r.Status().Patch()` in a deferred call; `r.Update()` will not persist status because the status subresource is enabled.
-- **Service ClusterIP** is preserved in the `CreateOrUpdate` mutate func — overwriting it causes an immutability error.
-- **Watch chain:** `.Owns(&appsv1.Deployment{})` and `.Owns(&corev1.Service{})` in `SetupWithManager` means changes to child resources re-enqueue the parent `Application`.
-- **Conditions** use `k8s.io/apimachinery/pkg/api/meta.SetStatusCondition` with standard `metav1.Condition` — types are `Available` and `Progressing`.
-- `make manifests` must be re-run after any change to `+kubebuilder:` markers in `api/v1alpha1/`.
+- **No CRDs.** All config is injected into `ServiceReconciler` as struct fields at startup (from YAML file + flag overrides + `CLOUDFLARE_API_TOKEN` env var).
+- **Finalizer** `cloudflare.rector.io/finalizer` is added before any external mutations; cleanup runs on deletion or hostname annotation removal.
+- **Annotation patch** uses `client.MergeFrom` so only changed annotations are written back — avoids clobbering other controllers.
+- **ConfigMap retry**: `configmap.Manager` retries up to 3× on `409 Conflict` (optimistic locking).
+- **CLOUDFLARE_API_TOKEN** is never in the config file — always from env var, mounted from a Kubernetes Secret.
+- `GOMODCACHE=/tmp/gomodcache go mod tidy` if the default module cache is root-owned.

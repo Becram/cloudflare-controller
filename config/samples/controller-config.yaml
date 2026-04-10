@@ -1,0 +1,14 @@
+cloudflare:
+  accountID: "your-cloudflare-account-id"
+  zoneID: "your-cloudflare-zone-id"
+  tunnelID: "your-argo-tunnel-uuid"
+
+cloudflared:
+  configMap:
+    name: cloudflared-config
+    namespace: cloudflare-system
+
+# Optional — defaults shown below
+metricsBindAddress: ":8080"
+healthProbeBindAddress: ":8081"
+leaderElect: false

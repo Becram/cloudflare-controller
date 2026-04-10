@@ -1,0 +1,13 @@
+cloudflare:
+  accountID: "REPLACE_ME"
+  zoneID: "REPLACE_ME"
+  tunnelID: "REPLACE_ME"
+
+cloudflared:
+  configMap:
+    name: cloudflared-config
+    namespace: cloudflare-system
+
+metricsBindAddress: ":8080"
+healthProbeBindAddress: ":8081"
+leaderElect: true
