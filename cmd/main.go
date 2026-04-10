@@ -50,10 +50,12 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.StringVar(&logLevel, "log-level", "", "Log verbosity: debug, info, warn, error. Overrides config file.")
 
-	opts := zap.Options{Development: true}
+	// opts.BindFlags registers --zap-* flags; parse them alongside our own flags.
+	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Use a bootstrap logger until the real level is known.
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Start from defaults, optionally populated from a config file.
@@ -100,14 +102,16 @@ func main() {
 		cfg.LogLevel = logLevel
 	}
 
-	// Apply log level from config (flag --zap-log-level still takes precedence
-	// if set, since opts.BindFlags already parsed it before this block).
+	// Re-initialise the logger now that the final log level is known.
+	// --zap-log-level flag takes precedence; config file logLevel is the fallback.
 	if opts.Level == nil {
 		var level zapcore.Level
 		if err := level.UnmarshalText([]byte(cfg.LogLevel)); err == nil {
 			opts.Level = level
 		}
 	}
+	opts.Development = cfg.LogLevel == "debug"
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if err := cfg.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid configuration")
