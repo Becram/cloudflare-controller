@@ -103,16 +103,33 @@ func main() {
 	}
 
 	// Re-initialise the logger now that the final log level is known.
-	// --zap-log-level flag takes precedence; config file logLevel is the fallback.
+	// Build a fresh Options so Development=true is picked up cleanly by
+	// addDefaults() — reusing the flags-bound opts causes the struct copy
+	// inside UseFlagOptions to miss the post-parse Development assignment.
+	//
+	// --zap-log-level / --zap-devel flags take precedence over config file.
 	ctrl.Log.Info("resolved log level", "logLevel", cfg.LogLevel)
-	if opts.Level == nil {
-		var level zapcore.Level
-		if err := level.UnmarshalText([]byte(cfg.LogLevel)); err == nil {
-			opts.Level = level
+	var finalLevel zapcore.LevelEnabler
+	if opts.Level != nil {
+		// Explicit --zap-log-level flag was passed; honour it.
+		finalLevel = opts.Level
+	} else if cfg.LogLevel != "" {
+		var lvl zapcore.Level
+		if err := lvl.UnmarshalText([]byte(cfg.LogLevel)); err == nil {
+			finalLevel = lvl
 		}
 	}
-	opts.Development = cfg.LogLevel == "debug"
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	dev := opts.Development || cfg.LogLevel == "debug"
+	ctrl.SetLogger(zap.New(func(o *zap.Options) {
+		o.Development = dev
+		o.Level = finalLevel
+		if opts.NewEncoder != nil {
+			o.NewEncoder = opts.NewEncoder
+		}
+		if opts.StacktraceLevel != nil {
+			o.StacktraceLevel = opts.StacktraceLevel
+		}
+	}))
 
 	if err := cfg.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid configuration")
