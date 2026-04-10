@@ -57,19 +57,28 @@ type ServiceReconciler struct {
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	logger.V(1).Info("reconcile started")
+
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, req.NamespacedName, svc); err != nil {
 		if apierrors.IsNotFound(err) {
+			logger.V(1).Info("service not found, skipping")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
 	hostname := svc.Annotations[AnnotationHostname]
+	logger.V(1).Info("service fetched",
+		"hostname", hostname,
+		"deletionTimestamp", svc.DeletionTimestamp,
+		"finalizers", svc.Finalizers,
+	)
 
 	// Deletion or annotation-removal path: clean up Cloudflare resources.
 	if !svc.DeletionTimestamp.IsZero() || hostname == "" {
 		if controllerutil.ContainsFinalizer(svc, Finalizer) {
+			logger.V(1).Info("running cleanup", "reason", map[bool]string{true: "deletion", false: "annotation removed"}[!svc.DeletionTimestamp.IsZero()])
 			if err := r.cleanup(ctx, svc); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -78,12 +87,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, err
 			}
 			logger.Info("finalizer removed", "service", req.NamespacedName)
+		} else {
+			logger.V(1).Info("no finalizer present, nothing to clean up")
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Ensure finalizer is present before any external mutations.
 	if !controllerutil.ContainsFinalizer(svc, Finalizer) {
+		logger.V(1).Info("adding finalizer")
 		controllerutil.AddFinalizer(svc, Finalizer)
 		if err := r.Update(ctx, svc); err != nil {
 			return ctrl.Result{}, err
@@ -95,24 +107,29 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	logger.V(1).Info("resolved backend URL", "backendURL", backendURL)
 
 	// Use MergeFrom to patch only changed annotations back to the Service.
 	patch := client.MergeFrom(svc.DeepCopy())
 
 	// 1. Ensure DNS CNAME record.
+	logger.V(1).Info("reconciling DNS record", "hostname", hostname)
 	if err := r.reconcileDNS(ctx, svc, hostname); err != nil {
 		r.Recorder.Eventf(svc, corev1.EventTypeWarning, "DNSFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 
 	// 2. Update cloudflared ConfigMap ingress rule.
+	logger.V(1).Info("upserting configmap ingress rule", "hostname", hostname, "backend", backendURL)
 	if err := r.ConfigMgr.UpsertIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname, backendURL); err != nil {
 		r.Recorder.Eventf(svc, corev1.EventTypeWarning, "ConfigMapFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 
 	// 3. Optionally create Cloudflare Access Application.
-	if svc.Annotations[AnnotationAccessEnabled] == "true" {
+	accessEnabled := svc.Annotations[AnnotationAccessEnabled] == "true"
+	logger.V(1).Info("access application", "enabled", accessEnabled)
+	if accessEnabled {
 		if err := r.reconcileAccessApp(ctx, svc, hostname); err != nil {
 			r.Recorder.Eventf(svc, corev1.EventTypeWarning, "AccessAppFailed", err.Error())
 			return ctrl.Result{}, err
@@ -124,6 +141,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("patching service annotations: %w", err)
 	}
 
+	logger.V(1).Info("reconcile complete", "requeueAfter", requeueAfter)
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 

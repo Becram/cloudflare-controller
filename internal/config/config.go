@@ -22,6 +22,10 @@ type Config struct {
 	MetricsBindAddress     string `yaml:"metricsBindAddress"`
 	HealthProbeBindAddress string `yaml:"healthProbeBindAddress"`
 	LeaderElect            bool   `yaml:"leaderElect"`
+
+	// LogLevel sets the zap log verbosity. Accepted values: debug, info, warn, error.
+	// Defaults to "info".
+	LogLevel string `yaml:"logLevel"`
 }
 
 // CloudflareConfig holds Cloudflare account and tunnel identifiers.
@@ -52,6 +56,7 @@ func defaults() Config {
 	return Config{
 		MetricsBindAddress:     ":8080",
 		HealthProbeBindAddress: ":8081",
+		LogLevel:               "info",
 	}
 }
 

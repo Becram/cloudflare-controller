@@ -7,11 +7,12 @@ import (
 	"context"
 	"fmt"
 
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"gopkg.in/yaml.v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -47,6 +48,7 @@ func New(c client.Client) *Manager {
 // ConfigMap, routing traffic to backendURL. The catch-all rule is always preserved
 // as the final entry.
 func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, backendURL string) error {
+	log.FromContext(ctx).V(1).Info("upserting ingress rule", "configmap", namespace+"/"+name, "hostname", hostname, "backend", backendURL)
 	return m.retryOnConflict(ctx, name, namespace, func(cfg *cloudflaredConfig) {
 		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
 		cfg.Ingress = insertBeforeCatchAll(cfg.Ingress, ingressRule{
@@ -58,6 +60,7 @@ func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, 
 
 // RemoveIngress deletes the ingress rule for hostname from the cloudflared ConfigMap.
 func (m *Manager) RemoveIngress(ctx context.Context, name, namespace, hostname string) error {
+	log.FromContext(ctx).V(1).Info("removing ingress rule", "configmap", namespace+"/"+name, "hostname", hostname)
 	return m.retryOnConflict(ctx, name, namespace, func(cfg *cloudflaredConfig) {
 		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
 	})
@@ -69,7 +72,13 @@ func (m *Manager) RemoveIngress(ctx context.Context, name, namespace, hostname s
 func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, mutateFn func(*cloudflaredConfig)) error {
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
+	logger := log.FromContext(ctx).WithValues("configmap", namespace+"/"+name)
+
 	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			logger.V(1).Info("retrying after conflict", "attempt", attempt+1)
+		}
+
 		cm := &corev1.ConfigMap{}
 		if err := m.client.Get(ctx, key, cm); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -77,13 +86,16 @@ func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, m
 			}
 			return fmt.Errorf("getting cloudflared configmap: %w", err)
 		}
+		logger.V(1).Info("configmap fetched", "resourceVersion", cm.ResourceVersion)
 
 		cfg, err := parseConfig(cm.Data[configKey])
 		if err != nil {
 			return err
 		}
+		logger.V(1).Info("parsed ingress rules", "count", len(cfg.Ingress))
 
 		mutateFn(cfg)
+		logger.V(1).Info("ingress rules after mutation", "count", len(cfg.Ingress))
 
 		raw, err := yaml.Marshal(cfg)
 		if err != nil {
@@ -98,10 +110,12 @@ func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, m
 
 		if err := m.client.Patch(ctx, cm, patch); err != nil {
 			if apierrors.IsConflict(err) {
+				logger.V(1).Info("conflict on patch, will retry")
 				continue
 			}
 			return fmt.Errorf("patching cloudflared configmap: %w", err)
 		}
+		logger.V(1).Info("configmap patched successfully")
 		return nil
 	}
 	return fmt.Errorf("failed to update cloudflared configmap after 3 attempts due to conflicts")
