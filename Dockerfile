@@ -3,11 +3,15 @@ FROM golang:1.22.5-alpine AS builder
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-w -s" -o manager ./cmd/main.go
 
 # ---
