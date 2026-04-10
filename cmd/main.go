@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"go.uber.org/zap/zapcore"
@@ -55,10 +56,8 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	// Use a bootstrap logger until the real level is known.
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	// Start from defaults, optionally populated from a config file.
+	// Load config before initialising the logger so logLevel is known for the
+	// single ctrl.SetLogger call. Use fmt.Fprintf for any pre-logger errors.
 	cfg := &config.Config{
 		MetricsBindAddress:     ":8080",
 		HealthProbeBindAddress: ":8081",
@@ -67,7 +66,7 @@ func main() {
 	if configFile != "" {
 		loaded, err := config.Load(configFile)
 		if err != nil {
-			ctrl.Log.Error(err, "failed to load config file")
+			fmt.Fprintf(os.Stderr, "failed to load config file: %v\n", err)
 			os.Exit(1)
 		}
 		cfg = loaded
@@ -102,34 +101,27 @@ func main() {
 		cfg.LogLevel = logLevel
 	}
 
-	// Re-initialise the logger now that the final log level is known.
-	// Build a fresh Options so Development=true is picked up cleanly by
-	// addDefaults() — reusing the flags-bound opts causes the struct copy
-	// inside UseFlagOptions to miss the post-parse Development assignment.
+	// Initialise the logger exactly once with the fully-resolved configuration.
+	// ctrl.SetLogger uses a delegating sink whose promise is fulfilled on the
+	// first call and ignored on any subsequent call — calling it twice means the
+	// second call is silently dropped, so we must call it only once.
 	//
-	// --zap-log-level / --zap-devel flags take precedence over config file.
-	ctrl.Log.Info("resolved log level", "logLevel", cfg.LogLevel)
-	var finalLevel zapcore.LevelEnabler
-	if opts.Level != nil {
-		// Explicit --zap-log-level flag was passed; honour it.
-		finalLevel = opts.Level
-	} else if cfg.LogLevel != "" {
+	// --zap-log-level / --zap-devel flags take precedence over the config file.
+	if opts.Level == nil && cfg.LogLevel != "" {
 		var lvl zapcore.Level
 		if err := lvl.UnmarshalText([]byte(cfg.LogLevel)); err == nil {
-			finalLevel = lvl
+			opts.Level = lvl
 		}
 	}
-	dev := opts.Development || cfg.LogLevel == "debug"
-	ctrl.SetLogger(zap.New(func(o *zap.Options) {
-		o.Development = dev
-		o.Level = finalLevel
-		if opts.NewEncoder != nil {
-			o.NewEncoder = opts.NewEncoder
-		}
-		if opts.StacktraceLevel != nil {
-			o.StacktraceLevel = opts.StacktraceLevel
-		}
-	}))
+	if !opts.Development {
+		opts.Development = cfg.LogLevel == "debug"
+	}
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	ctrl.Log.Info("starting rector cloudflare controller",
+		"config", configFile,
+		"logLevel", cfg.LogLevel,
+	)
 
 	if err := cfg.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid configuration")
@@ -188,7 +180,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrl.Log.Info("starting rector cloudflare controller", "config", configFile)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
