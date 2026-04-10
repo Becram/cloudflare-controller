@@ -104,6 +104,7 @@ func main() {
 
 	// Re-initialise the logger now that the final log level is known.
 	// --zap-log-level flag takes precedence; config file logLevel is the fallback.
+	ctrl.Log.Info("resolved log level", "logLevel", cfg.LogLevel)
 	if opts.Level == nil {
 		var level zapcore.Level
 		if err := level.UnmarshalText([]byte(cfg.LogLevel)); err == nil {
