@@ -29,6 +29,7 @@ const (
 	AnnotationAccessPolicies = "cloudflare-controller.io/access-policies"
 	AnnotationDNSRecordID   = "cloudflare-controller.io/dns-record-id"
 	AnnotationAccessAppID   = "cloudflare-controller.io/access-app-id"
+	AnnotationHTTP2Origin   = "cloudflare-controller.io/http2-origin"
 	Finalizer               = "cloudflare-controller.io/finalizer"
 
 	requeueAfter = 5 * time.Minute
@@ -135,8 +136,9 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// 2. Update cloudflared ConfigMap ingress rule.
-	logger.V(1).Info("upserting configmap ingress rule", "hostname", hostname, "backend", backendURL)
-	cmChanged, err := r.ConfigMgr.UpsertIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname, backendURL)
+	http2Origin := svc.Annotations[AnnotationHTTP2Origin] == "true"
+	logger.V(1).Info("upserting configmap ingress rule", "hostname", hostname, "backend", backendURL, "http2Origin", http2Origin)
+	cmChanged, err := r.ConfigMgr.UpsertIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname, backendURL, http2Origin)
 	if err != nil {
 		r.Recorder.Eventf(svc, corev1.EventTypeWarning, "ConfigMapFailed", err.Error())
 		return ctrl.Result{}, err

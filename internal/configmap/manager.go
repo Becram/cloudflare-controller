@@ -27,11 +27,17 @@ type cloudflaredConfig struct {
 	Ingress         []ingressRule `yaml:"ingress"`
 }
 
+// originRequest holds per-ingress origin connection settings.
+type originRequest struct {
+	HTTP2Origin bool `yaml:"http2Origin,omitempty"`
+}
+
 // ingressRule maps a hostname to a backend service URL.
 // hostname is omitted for the catch-all rule.
 type ingressRule struct {
-	Hostname string `yaml:"hostname,omitempty"`
-	Service  string `yaml:"service"`
+	Hostname      string         `yaml:"hostname,omitempty"`
+	Service       string         `yaml:"service"`
+	OriginRequest *originRequest `yaml:"originRequest,omitempty"`
 }
 
 // Manager performs read-modify-write operations on the cloudflared ConfigMap.
@@ -46,15 +52,17 @@ func New(c client.Client) *Manager {
 
 // UpsertIngress adds or updates the ingress rule for hostname in the cloudflared
 // ConfigMap, routing traffic to backendURL. The catch-all rule is always preserved
-// as the final entry. Returns true if the ConfigMap was actually modified.
-func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, backendURL string) (bool, error) {
-	log.FromContext(ctx).V(1).Info("upserting ingress rule", "configmap", namespace+"/"+name, "hostname", hostname, "backend", backendURL)
+// as the final entry. Set http2Origin to true for gRPC/HTTP2 backends.
+// Returns true if the ConfigMap was actually modified.
+func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, backendURL string, http2Origin bool) (bool, error) {
+	log.FromContext(ctx).V(1).Info("upserting ingress rule", "configmap", namespace+"/"+name, "hostname", hostname, "backend", backendURL, "http2Origin", http2Origin)
 	return m.retryOnConflict(ctx, name, namespace, func(cfg *cloudflaredConfig) {
+		rule := ingressRule{Hostname: hostname, Service: backendURL}
+		if http2Origin {
+			rule.OriginRequest = &originRequest{HTTP2Origin: true}
+		}
 		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
-		cfg.Ingress = insertBeforeCatchAll(cfg.Ingress, ingressRule{
-			Hostname: hostname,
-			Service:  backendURL,
-		})
+		cfg.Ingress = insertBeforeCatchAll(cfg.Ingress, rule)
 	})
 }
 
