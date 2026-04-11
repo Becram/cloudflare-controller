@@ -26,7 +26,7 @@ const (
 	labelValue = "cloudflared"
 )
 
-// Manager creates and reconciles the cloudflared Deployment and ConfigMap.
+// Manager creates and reconciles the cloudflared Secret, ConfigMap, and Deployment.
 type Manager struct {
 	client            client.Client
 	namespace         string
@@ -36,10 +36,11 @@ type Manager struct {
 	replicas          int32
 	tunnelID          string
 	credentialsSecret string
+	credentialsJSON   string
 }
 
 // New returns a Manager that will reconcile cloudflared infra in namespace.
-func New(c client.Client, namespace, configMapName, deploymentName, image string, replicas int32, tunnelID, credentialsSecret string) *Manager {
+func New(c client.Client, namespace, configMapName, deploymentName, image string, replicas int32, tunnelID, credentialsSecret, credentialsJSON string) *Manager {
 	return &Manager{
 		client:            c,
 		namespace:         namespace,
@@ -49,16 +50,50 @@ func New(c client.Client, namespace, configMapName, deploymentName, image string
 		replicas:          replicas,
 		tunnelID:          tunnelID,
 		credentialsSecret: credentialsSecret,
+		credentialsJSON:   credentialsJSON,
 	}
 }
 
-// EnsureInfra idempotently creates the cloudflared ConfigMap (if absent) and
-// reconciles the cloudflared Deployment toward the desired state.
+// EnsureInfra idempotently reconciles the cloudflared Secret, ConfigMap, and
+// Deployment. The Secret is created first so the Deployment volume mount is
+// satisfiable on first creation.
 func (m *Manager) EnsureInfra(ctx context.Context) error {
+	if err := m.ensureCredentialsSecret(ctx); err != nil {
+		return err
+	}
 	if err := m.ensureConfigMap(ctx); err != nil {
 		return err
 	}
 	return m.ensureDeployment(ctx)
+}
+
+// ensureCredentialsSecret creates or updates the cloudflared credentials Secret
+// with the tunnel credentials JSON under the key "credentials.json".
+func (m *Manager) ensureCredentialsSecret(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithValues("secret", m.namespace+"/"+m.credentialsSecret)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      m.credentialsSecret,
+			Namespace: m.namespace,
+		},
+	}
+	result, err := controllerutil.CreateOrUpdate(ctx, m.client, secret, func() error {
+		secret.Labels = map[string]string{labelKey: labelValue}
+		// StringData lets Kubernetes handle base64 encoding; map is overwritten
+		// on each reconcile so the Secret stays in sync with the config value.
+		secret.StringData = map[string]string{credsKey: m.credentialsJSON}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling cloudflared credentials secret: %w", err)
+	}
+	if result != controllerutil.OperationResultNone {
+		logger.Info("cloudflared credentials secret reconciled", "result", result)
+	} else {
+		logger.V(1).Info("cloudflared credentials secret unchanged")
+	}
+	return nil
 }
 
 // ensureConfigMap creates the cloudflared ConfigMap with a minimal base

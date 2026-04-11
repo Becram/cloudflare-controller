@@ -157,7 +157,7 @@ func main() {
 	}
 
 	var cloudflaredMgr *cfd.Manager
-	if cfg.Cloudflared.CredentialsSecret != "" {
+	if cfg.Cloudflared.CredentialsJSON != "" {
 		cloudflaredMgr = cfd.New(
 			mgr.GetClient(),
 			cfg.Cloudflared.ConfigMap.Namespace,
@@ -167,6 +167,7 @@ func main() {
 			cfg.Cloudflared.Replicas,
 			cfg.Cloudflare.TunnelID,
 			cfg.Cloudflared.CredentialsSecret,
+			cfg.Cloudflared.CredentialsJSON,
 		)
 	}
 

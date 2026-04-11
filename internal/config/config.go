@@ -54,11 +54,16 @@ type CloudflaredConfig struct {
 	DeploymentName string `yaml:"deploymentName"`
 
 	// CredentialsSecret is the name of the Kubernetes Secret (in the same
-	// namespace as the ConfigMap) containing the tunnel credentials JSON
-	// under the key "credentials.json". When set, the controller creates and
-	// reconciles the cloudflared ConfigMap and Deployment. When empty, the
-	// controller only manages ingress rules in a pre-existing ConfigMap.
+	// namespace as the ConfigMap) that the controller will create/manage,
+	// containing the tunnel credentials JSON under the key "credentials.json".
+	// Defaults to "cloudflared-creds".
 	CredentialsSecret string `yaml:"credentialsSecret"`
+
+	// CredentialsJSON is the raw content of the Cloudflare tunnel credentials
+	// JSON file. When set, the controller creates and manages the Secret named
+	// by CredentialsSecret. Required to enable full infra management
+	// (Secret + ConfigMap + Deployment).
+	CredentialsJSON string `yaml:"credentialsJSON"`
 
 	ConfigMap ConfigMapRef `yaml:"configMap"`
 }
@@ -76,9 +81,10 @@ func defaults() Config {
 		HealthProbeBindAddress: ":8081",
 		LogLevel:               "info",
 		Cloudflared: CloudflaredConfig{
-			Image:          "cloudflare/cloudflared:latest",
-			Replicas:       2,
-			DeploymentName: "cloudflared",
+			Image:             "cloudflare/cloudflared:latest",
+			Replicas:          2,
+			DeploymentName:    "cloudflared",
+			CredentialsSecret: "cloudflared-creds",
 		},
 	}
 }
