@@ -61,7 +61,17 @@ func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, 
 		if http2Origin {
 			rule.OriginRequest = &originRequest{HTTP2Origin: true}
 		}
-		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
+		// Update in-place if a rule for this hostname already exists. This
+		// preserves the rule's position in the list so the marshaled YAML is
+		// stable across reconciles and does not trigger spurious ConfigMap
+		// updates (and downstream cloudflared restarts).
+		for i, r := range cfg.Ingress {
+			if r.Hostname == hostname {
+				cfg.Ingress[i] = rule
+				return
+			}
+		}
+		// No existing rule — append before the catch-all.
 		cfg.Ingress = insertBeforeCatchAll(cfg.Ingress, rule)
 	})
 }

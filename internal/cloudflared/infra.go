@@ -81,9 +81,15 @@ func (m *Manager) ensureCredentialsSecret(ctx context.Context) error {
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, m.client, secret, func() error {
 		secret.Labels = map[string]string{labelKey: labelValue}
-		// StringData lets Kubernetes handle base64 encoding; map is overwritten
-		// on each reconcile so the Secret stays in sync with the config value.
-		secret.StringData = map[string]string{credsKey: m.credentialsJSON}
+		// Use Data ([]byte) rather than StringData. StringData is a write-only
+		// field — after a Get, the API always returns it as nil even if the
+		// Secret was previously created with StringData. Setting StringData in
+		// the mutate fn would therefore always look like a change to
+		// CreateOrUpdate, causing a spurious Update on every reconcile.
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+		secret.Data[credsKey] = []byte(m.credentialsJSON)
 		return nil
 	})
 	if err != nil {
