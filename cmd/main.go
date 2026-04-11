@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cfc "github.com/bikramdhoju/rector/internal/cloudflare"
@@ -197,20 +199,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := ctrl.SetupSignalHandler()
-
-	// Ensure cloudflared infra exists at startup, independent of whether any
-	// annotated Services are present. This creates the Secret, ConfigMap, and
-	// Deployment on first run without waiting for a Service reconcile trigger.
+	// Register a one-shot Runnable that ensures cloudflared infra exists once
+	// the manager cache is started. This avoids the "cache not started" error
+	// that occurs when using mgr.GetClient() before mgr.Start().
 	if cloudflaredMgr != nil {
-		ctrl.Log.Info("ensuring cloudflared infra at startup")
-		if err := cloudflaredMgr.EnsureInfra(ctx); err != nil {
-			ctrl.Log.Error(err, "failed to ensure cloudflared infra at startup")
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			ctrl.Log.Info("ensuring cloudflared infra at startup")
+			return cloudflaredMgr.EnsureInfra(ctx)
+		})); err != nil {
+			ctrl.Log.Error(err, "unable to register cloudflared infra runnable")
 			os.Exit(1)
 		}
 	}
 
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
 	}
