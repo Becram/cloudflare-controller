@@ -28,6 +28,7 @@ rules:
       - get
       - list
       - watch
+      - create
       - update
       - patch
   - apiGroups:
@@ -36,4 +37,15 @@ rules:
       - events
     verbs:
       - create
+      - patch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
       - patch

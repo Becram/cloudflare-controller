@@ -40,8 +40,26 @@ type CloudflareConfig struct {
 	TunnelID string `yaml:"tunnelID"`
 }
 
-// CloudflaredConfig references the cloudflared ConfigMap managed by the controller.
+// CloudflaredConfig controls both the cloudflared infra (Deployment + ConfigMap)
+// and the ingress rules within that ConfigMap.
 type CloudflaredConfig struct {
+	// Image is the cloudflared container image. Defaults to "cloudflare/cloudflared:latest".
+	Image string `yaml:"image"`
+
+	// Replicas is the desired number of cloudflared pods. Defaults to 2.
+	Replicas int32 `yaml:"replicas"`
+
+	// DeploymentName is the name of the cloudflared Deployment.
+	// Defaults to "cloudflared".
+	DeploymentName string `yaml:"deploymentName"`
+
+	// CredentialsSecret is the name of the Kubernetes Secret (in the same
+	// namespace as the ConfigMap) containing the tunnel credentials JSON
+	// under the key "credentials.json". When set, the controller creates and
+	// reconciles the cloudflared ConfigMap and Deployment. When empty, the
+	// controller only manages ingress rules in a pre-existing ConfigMap.
+	CredentialsSecret string `yaml:"credentialsSecret"`
+
 	ConfigMap ConfigMapRef `yaml:"configMap"`
 }
 
@@ -57,6 +75,11 @@ func defaults() Config {
 		MetricsBindAddress:     ":8080",
 		HealthProbeBindAddress: ":8081",
 		LogLevel:               "info",
+		Cloudflared: CloudflaredConfig{
+			Image:          "cloudflare/cloudflared:latest",
+			Replicas:       2,
+			DeploymentName: "cloudflared",
+		},
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	cfc "github.com/bikramdhoju/rector/internal/cloudflare"
+	cfd "github.com/bikramdhoju/rector/internal/cloudflared"
 	"github.com/bikramdhoju/rector/internal/configmap"
 )
 
@@ -38,13 +39,17 @@ const (
 //
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core,resources=services/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 type ServiceReconciler struct {
 	client.Client
 	Scheme               *runtime.Scheme
 	Recorder             record.EventRecorder
 	ConfigMgr            *configmap.Manager
+	// CloudflaredMgr manages the cloudflared Deployment and ConfigMap lifecycle.
+	// Nil when credentialsSecret is not configured (ingress-only mode).
+	CloudflaredMgr       *cfd.Manager
 	ConfigMapName        string
 	ConfigMapNamespace   string
 	// Cloudflare config — sourced from flags and CLOUDFLARE_API_TOKEN env var at startup.
@@ -111,6 +116,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Use MergeFrom to patch only changed annotations back to the Service.
 	patch := client.MergeFrom(svc.DeepCopy())
+
+	// 0. Ensure cloudflared ConfigMap and Deployment exist.
+	if r.CloudflaredMgr != nil {
+		logger.V(1).Info("ensuring cloudflared infra")
+		if err := r.CloudflaredMgr.EnsureInfra(ctx); err != nil {
+			r.Recorder.Eventf(svc, corev1.EventTypeWarning, "CloudflaredInfraFailed", err.Error())
+			return ctrl.Result{}, err
+		}
+	}
 
 	// 1. Ensure DNS CNAME record.
 	logger.V(1).Info("reconciling DNS record", "hostname", hostname)

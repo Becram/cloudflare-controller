@@ -15,6 +15,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cfc "github.com/bikramdhoju/rector/internal/cloudflare"
+	cfd "github.com/bikramdhoju/rector/internal/cloudflared"
 	"github.com/bikramdhoju/rector/internal/config"
 	"github.com/bikramdhoju/rector/internal/configmap"
 	"github.com/bikramdhoju/rector/internal/controller"
@@ -155,11 +156,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	var cloudflaredMgr *cfd.Manager
+	if cfg.Cloudflared.CredentialsSecret != "" {
+		cloudflaredMgr = cfd.New(
+			mgr.GetClient(),
+			cfg.Cloudflared.ConfigMap.Namespace,
+			cfg.Cloudflared.ConfigMap.Name,
+			cfg.Cloudflared.DeploymentName,
+			cfg.Cloudflared.Image,
+			cfg.Cloudflared.Replicas,
+			cfg.Cloudflare.TunnelID,
+			cfg.Cloudflared.CredentialsSecret,
+		)
+	}
+
 	if err := (&controller.ServiceReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
 		Recorder:             mgr.GetEventRecorderFor("rector-cloudflare-controller"),
 		ConfigMgr:            configmap.New(mgr.GetClient()),
+		CloudflaredMgr:       cloudflaredMgr,
 		ConfigMapName:        cfg.Cloudflared.ConfigMap.Name,
 		ConfigMapNamespace:   cfg.Cloudflared.ConfigMap.Namespace,
 		CFClient:             cfClient,
