@@ -46,8 +46,8 @@ func New(c client.Client) *Manager {
 
 // UpsertIngress adds or updates the ingress rule for hostname in the cloudflared
 // ConfigMap, routing traffic to backendURL. The catch-all rule is always preserved
-// as the final entry.
-func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, backendURL string) error {
+// as the final entry. Returns true if the ConfigMap was actually modified.
+func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, backendURL string) (bool, error) {
 	log.FromContext(ctx).V(1).Info("upserting ingress rule", "configmap", namespace+"/"+name, "hostname", hostname, "backend", backendURL)
 	return m.retryOnConflict(ctx, name, namespace, func(cfg *cloudflaredConfig) {
 		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
@@ -59,7 +59,8 @@ func (m *Manager) UpsertIngress(ctx context.Context, name, namespace, hostname, 
 }
 
 // RemoveIngress deletes the ingress rule for hostname from the cloudflared ConfigMap.
-func (m *Manager) RemoveIngress(ctx context.Context, name, namespace, hostname string) error {
+// Returns true if the ConfigMap was actually modified.
+func (m *Manager) RemoveIngress(ctx context.Context, name, namespace, hostname string) (bool, error) {
 	log.FromContext(ctx).V(1).Info("removing ingress rule", "configmap", namespace+"/"+name, "hostname", hostname)
 	return m.retryOnConflict(ctx, name, namespace, func(cfg *cloudflaredConfig) {
 		cfg.Ingress = removeByHostname(cfg.Ingress, hostname)
@@ -67,9 +68,9 @@ func (m *Manager) RemoveIngress(ctx context.Context, name, namespace, hostname s
 }
 
 // retryOnConflict fetches the ConfigMap, runs mutateFn on the parsed config,
-// marshals it back, and updates the ConfigMap. Retries up to 3 times on
-// optimistic-lock conflicts (HTTP 409).
-func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, mutateFn func(*cloudflaredConfig)) error {
+// marshals it back, and patches the ConfigMap. Returns true if the content
+// actually changed. Retries up to 3 times on optimistic-lock conflicts (HTTP 409).
+func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, mutateFn func(*cloudflaredConfig)) (bool, error) {
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
 	logger := log.FromContext(ctx).WithValues("configmap", namespace+"/"+name)
@@ -82,43 +83,50 @@ func (m *Manager) retryOnConflict(ctx context.Context, name, namespace string, m
 		cm := &corev1.ConfigMap{}
 		if err := m.client.Get(ctx, key, cm); err != nil {
 			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("cloudflared configmap %s/%s not found", namespace, name)
+				return false, fmt.Errorf("cloudflared configmap %s/%s not found", namespace, name)
 			}
-			return fmt.Errorf("getting cloudflared configmap: %w", err)
+			return false, fmt.Errorf("getting cloudflared configmap: %w", err)
 		}
 		logger.V(1).Info("configmap fetched", "resourceVersion", cm.ResourceVersion)
 
 		cfg, err := parseConfig(cm.Data[configKey])
 		if err != nil {
-			return err
+			return false, err
 		}
 		logger.V(1).Info("parsed ingress rules", "count", len(cfg.Ingress))
 
+		oldContent := cm.Data[configKey]
 		mutateFn(cfg)
 		logger.V(1).Info("ingress rules after mutation", "count", len(cfg.Ingress))
 
 		raw, err := yaml.Marshal(cfg)
 		if err != nil {
-			return fmt.Errorf("marshaling cloudflared config: %w", err)
+			return false, fmt.Errorf("marshaling cloudflared config: %w", err)
+		}
+		newContent := string(raw)
+
+		if newContent == oldContent {
+			logger.V(1).Info("configmap content unchanged, skipping patch")
+			return false, nil
 		}
 
 		patch := client.MergeFrom(cm.DeepCopy())
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
 		}
-		cm.Data[configKey] = string(raw)
+		cm.Data[configKey] = newContent
 
 		if err := m.client.Patch(ctx, cm, patch); err != nil {
 			if apierrors.IsConflict(err) {
 				logger.V(1).Info("conflict on patch, will retry")
 				continue
 			}
-			return fmt.Errorf("patching cloudflared configmap: %w", err)
+			return false, fmt.Errorf("patching cloudflared configmap: %w", err)
 		}
 		logger.V(1).Info("configmap patched successfully")
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("failed to update cloudflared configmap after 3 attempts due to conflicts")
+	return false, fmt.Errorf("failed to update cloudflared configmap after 3 attempts due to conflicts")
 }
 
 // parseConfig unmarshals config.yaml content into a cloudflaredConfig.

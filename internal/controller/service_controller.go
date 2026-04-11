@@ -136,9 +136,18 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 2. Update cloudflared ConfigMap ingress rule.
 	logger.V(1).Info("upserting configmap ingress rule", "hostname", hostname, "backend", backendURL)
-	if err := r.ConfigMgr.UpsertIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname, backendURL); err != nil {
+	cmChanged, err := r.ConfigMgr.UpsertIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname, backendURL)
+	if err != nil {
 		r.Recorder.Eventf(svc, corev1.EventTypeWarning, "ConfigMapFailed", err.Error())
 		return ctrl.Result{}, err
+	}
+	if cmChanged && r.CloudflaredMgr != nil {
+		logger.Info("configmap updated, restarting cloudflared deployment")
+		if err := r.CloudflaredMgr.RestartDeployment(ctx); err != nil {
+			r.Recorder.Eventf(svc, corev1.EventTypeWarning, "CloudflaredRestartFailed", err.Error())
+			return ctrl.Result{}, err
+		}
+		r.Recorder.Eventf(svc, corev1.EventTypeNormal, "CloudflaredRestarted", "cloudflared deployment restarted after config update")
 	}
 
 	// 3. Optionally create Cloudflare Access Application and sync policies.
@@ -218,10 +227,17 @@ func (r *ServiceReconciler) cleanup(ctx context.Context, svc *corev1.Service) er
 
 	// Remove ingress rule from ConfigMap.
 	if hostname != "" {
-		if err := r.ConfigMgr.RemoveIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname); err != nil {
+		cmChanged, err := r.ConfigMgr.RemoveIngress(ctx, r.ConfigMapName, r.ConfigMapNamespace, hostname)
+		if err != nil {
 			return fmt.Errorf("removing configmap ingress during cleanup: %w", err)
 		}
 		logger.Info("ingress rule removed from cloudflared configmap", "hostname", hostname)
+		if cmChanged && r.CloudflaredMgr != nil {
+			logger.Info("configmap updated, restarting cloudflared deployment")
+			if err := r.CloudflaredMgr.RestartDeployment(ctx); err != nil {
+				return fmt.Errorf("restarting cloudflared deployment after configmap update: %w", err)
+			}
+		}
 	}
 
 	// Delete Access Application.

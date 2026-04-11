@@ -6,6 +6,7 @@ package cloudflared
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -165,6 +166,30 @@ func (m *Manager) ensureDeployment(ctx context.Context) error {
 	} else {
 		logger.V(1).Info("cloudflared deployment unchanged")
 	}
+	return nil
+}
+
+// RestartDeployment triggers a rolling restart of the cloudflared Deployment by
+// updating the "kubectl.kubernetes.io/restartedAt" pod template annotation —
+// the same mechanism used by `kubectl rollout restart`.
+func (m *Manager) RestartDeployment(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithValues("deployment", m.namespace+"/"+m.deploymentName)
+
+	deploy := &appsv1.Deployment{}
+	if err := m.client.Get(ctx, types.NamespacedName{Name: m.deploymentName, Namespace: m.namespace}, deploy); err != nil {
+		return fmt.Errorf("getting cloudflared deployment for restart: %w", err)
+	}
+
+	patch := client.MergeFrom(deploy.DeepCopy())
+	if deploy.Spec.Template.Annotations == nil {
+		deploy.Spec.Template.Annotations = make(map[string]string)
+	}
+	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().UTC().Format(time.RFC3339)
+
+	if err := m.client.Patch(ctx, deploy, patch); err != nil {
+		return fmt.Errorf("patching cloudflared deployment for restart: %w", err)
+	}
+	logger.Info("cloudflared deployment restart triggered")
 	return nil
 }
 
