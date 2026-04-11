@@ -197,7 +197,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := ctrl.SetupSignalHandler()
+
+	// Ensure cloudflared infra exists at startup, independent of whether any
+	// annotated Services are present. This creates the Secret, ConfigMap, and
+	// Deployment on first run without waiting for a Service reconcile trigger.
+	if cloudflaredMgr != nil {
+		ctrl.Log.Info("ensuring cloudflared infra at startup")
+		if err := cloudflaredMgr.EnsureInfra(ctx); err != nil {
+			ctrl.Log.Error(err, "failed to ensure cloudflared infra at startup")
+			os.Exit(1)
+		}
+	}
+
+	if err := mgr.Start(ctx); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
 	}
