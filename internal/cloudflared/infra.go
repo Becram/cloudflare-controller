@@ -152,9 +152,16 @@ func (m *Manager) ensureDeployment(ctx context.Context) error {
 			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		}
 		deploy.Spec.Replicas = &replicas
+		// Preserve existing pod template annotations (e.g. restartedAt set by
+		// RestartDeployment) so that overwriting the template does not trigger
+		// a spurious rollout on every reconcile.
+		existingAnnotations := deploy.Spec.Template.Annotations
 		deploy.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec:       m.podSpec(),
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      labels,
+				Annotations: existingAnnotations,
+			},
+			Spec: m.podSpec(),
 		}
 		return nil
 	})
