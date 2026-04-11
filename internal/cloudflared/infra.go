@@ -147,21 +147,23 @@ func (m *Manager) ensureDeployment(ctx context.Context) error {
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, m.client, deploy, func() error {
 		deploy.Labels = labels
-		// Selector is immutable after creation — only set when creating.
-		if deploy.CreationTimestamp.IsZero() {
-			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
-		}
 		deploy.Spec.Replicas = &replicas
-		// Preserve existing pod template annotations (e.g. restartedAt set by
-		// RestartDeployment) so that overwriting the template does not trigger
-		// a spurious rollout on every reconcile.
-		existingAnnotations := deploy.Spec.Template.Annotations
-		deploy.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Labels:      labels,
-				Annotations: existingAnnotations,
-			},
-			Spec: m.podSpec(),
+		if deploy.CreationTimestamp.IsZero() {
+			// First creation: set immutable selector and full pod template spec.
+			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+			deploy.Spec.Template = corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec:       m.podSpec(),
+			}
+			return nil
+		}
+		// Existing deployment: only update the fields we own to avoid wiping
+		// Kubernetes-defaulted fields (terminationMessagePath, imagePullPolicy,
+		// dnsPolicy, etc.) which would cause a spurious pod template diff and
+		// rolling restart on every reconcile.
+		deploy.Spec.Template.Labels = labels
+		if len(deploy.Spec.Template.Spec.Containers) > 0 {
+			deploy.Spec.Template.Spec.Containers[0].Image = m.image
 		}
 		return nil
 	})
