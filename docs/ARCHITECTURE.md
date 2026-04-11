@@ -8,15 +8,16 @@
 4. [Controller Design](#controller-design)
 5. [Cloudflare Resource Lifecycle](#cloudflare-resource-lifecycle)
 6. [ConfigMap Management](#configmap-management)
-7. [Configuration System](#configuration-system)
-8. [Secret Handling](#secret-handling)
-9. [Error Handling and Retries](#error-handling-and-retries)
-10. [Logging](#logging)
-11. [RBAC Model](#rbac-model)
-12. [Build and Image](#build-and-image)
-13. [Dependencies](#dependencies)
-14. [Design Decisions](#design-decisions)
-15. [Known Limitations](#known-limitations)
+7. [cloudflared Infrastructure Management](#cloudflared-infrastructure-management)
+8. [Configuration System](#configuration-system)
+9. [Secret Handling](#secret-handling)
+10. [Error Handling and Retries](#error-handling-and-retries)
+11. [Logging](#logging)
+12. [RBAC Model](#rbac-model)
+13. [Build and Image](#build-and-image)
+14. [Dependencies](#dependencies)
+15. [Design Decisions](#design-decisions)
+16. [Known Limitations](#known-limitations)
 
 ---
 
@@ -28,17 +29,18 @@ cloudflare-controller is a Kubernetes controller built on [controller-runtime](h
 
 When a Kubernetes Service is annotated with `cloudflare-controller.io/hostname`, cloudflare-controller:
 
-1. Creates a proxied **CNAME DNS record** in Cloudflare DNS: `<hostname> → <tunnelID>.cfargotunnel.com`
-2. Upserts an **ingress rule** in the cloudflared ConfigMap: `<hostname> → http://<svc>.<ns>.svc.cluster.local:<port>`
-3. Optionally creates a **Cloudflare Zero Trust Access Application** for the hostname
+1. Idempotently ensures the **cloudflared Deployment, ConfigMap, and credentials Secret** exist (when credentials are configured)
+2. Creates a proxied **CNAME DNS record** in Cloudflare DNS: `<hostname> → <tunnelID>.cfargotunnel.com`
+3. Upserts an **ingress rule** in the cloudflared ConfigMap: `<hostname> → http://<svc>.<ns>.svc.cluster.local:<port>`
+4. Triggers a **rolling restart** of the cloudflared Deployment when the ConfigMap changes
+5. Optionally creates a **Cloudflare Zero Trust Access Application** for the hostname
+6. Optionally syncs **Access Policies** to the Access Application on every reconcile
 
-When the annotation is removed or the Service is deleted, cloudflare-controller reverses all three operations in a guaranteed cleanup sequence enforced by a Kubernetes finalizer.
+When the annotation is removed or the Service is deleted, cloudflare-controller reverses operations 2–5 in a guaranteed cleanup sequence enforced by a Kubernetes finalizer.
 
 ### What cloudflare-controller does NOT do
 
 - Does not create or manage the Argo Tunnel itself (tunnel must pre-exist)
-- Does not manage cloudflared deployment or credentials
-- Does not configure Access Policies (only creates the Access Application shell)
 - Does not support multiple tunnels per controller instance
 - Does not create custom CRDs — operates entirely on standard `core/v1` resources
 
@@ -57,24 +59,30 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
 │  │  │  cloudflared Deployment │◄───┼───│  cloudflared ConfigMap   │   │
 │  │  │  (tunnel daemon)        │    │   │  (ingress rules)         │   │
 │  │  └─────────────────────────┘    │   │                          │   │
-│  │                                  │   │  ingress:               │   │
-│  │  ┌─────────────────────────┐    │   │  - hostname: app.ex.com │   │
-│  │  │  cloudflare-controller-controller      │────┼──►│    service: http://...  │   │
+│  │           ▲  manages            │   │  ingress:               │   │
+│  │  ┌────────┴────────────────┐    │   │  - hostname: app.ex.com │   │
+│  │  │  cloudflare-controller  │────┼──►│    service: http://...  │   │
 │  │  │  (this controller)      │    │   │  - service: http_status │   │
 │  │  └──────────┬──────────────┘    │   │             :404        │   │
-│  │             │                    │   └──────────────────────────┘   │
-│  └─────────────┼────────────────────┘                                   │
+│  │             │  manages          │   └──────────────────────────┘   │
+│  │  ┌──────────▼──────────────┐    │                                   │
+│  │  │  cloudflared Secret     │    │                                   │
+│  │  │  (tunnel credentials)   │    │                                   │
+│  │  └─────────────────────────┘    │                                   │
+│  └─────────────┬────────────────────┘                                   │
 │                │ watches                                                  │
 │                ▼                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │  All Namespaces                                                   │   │
 │  │                                                                   │   │
 │  │  Service (annotated)                                              │   │
-│  │    cloudflare-controller.io/hostname: "app.example.com"              │   │
-│  │    cloudflare-controller.io/port: "8080"          (optional)         │   │
-│  │    cloudflare-controller.io/access-enabled: "true" (optional)        │   │
-│  │    cloudflare-controller.io/dns-record-id: "<id>" (written back)     │   │
-│  │    cloudflare-controller.io/access-app-id: "<id>" (written back)     │   │
+│  │    cloudflare-controller.io/hostname: "app.example.com"          │   │
+│  │    cloudflare-controller.io/port: "8080"          (optional)     │   │
+│  │    cloudflare-controller.io/access-enabled: "true" (optional)    │   │
+│  │    cloudflare-controller.io/access-policies: "p1,p2" (optional)  │   │
+│  │    cloudflare-controller.io/http2-origin: "true"   (optional)    │   │
+│  │    cloudflare-controller.io/dns-record-id: "<id>"  (written back)│   │
+│  │    cloudflare-controller.io/access-app-id: "<id>"  (written back)│   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
                 │
@@ -87,7 +95,7 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
 │  ┌──────────────────────────┐    ┌──────────────────────────────────┐  │
 │  │  CNAME record            │    │  Access Application              │  │
 │  │  app.example.com         │    │  app.example.com                 │  │
-│  │  → tunnelID.cfargotunnel │    │  (self-hosted, session 24h)      │  │
+│  │  → tunnelID.cfargotunnel │    │  + Access Policies               │  │
 │  │    .com                  │    │                                  │  │
 │  └──────────────────────────┘    └──────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -114,6 +122,11 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
         │       └─► ADD finalizer → UPDATE Service → return
         │           (triggers re-enqueue via watch event)
         │
+        ├─► CloudflaredMgr.EnsureInfra() (if credentials configured)
+        │       ├─► CreateOrUpdate credentials Secret
+        │       ├─► Create ConfigMap (if absent, with base config)
+        │       └─► CreateOrUpdate cloudflared Deployment
+        │
         ├─► reconcileDNS()
         │       ├─► ListDNSRecords (Cloudflare API) — CNAME for hostname
         │       ├─► Record exists with correct target → return recordID (no-op)
@@ -125,16 +138,16 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
         │       ├─► GET ConfigMap from API Server
         │       ├─► Parse config.yaml YAML key
         │       ├─► Remove existing rule for hostname (idempotent)
-        │       ├─► Insert new rule before catch-all
+        │       ├─► Insert new rule before catch-all (with http2Origin if annotated)
         │       ├─► Marshal back to YAML
-        │       └─► PATCH ConfigMap (retry up to 3× on 409 Conflict)
+        │       ├─► PATCH ConfigMap (retry up to 3× on 409 Conflict)
+        │       └─► ConfigMap changed? → RestartDeployment() (restartedAt annotation)
         │
         ├─► access-enabled == "true"?
         │       └─► reconcileAccessApp()
         │               ├─► ListAccessApplications — match by domain
-        │               ├─► App exists → return appID (no-op)
-        │               └─► App absent → CreateAccessApplication → return appID
-        │                   Writes cloudflare-controller.io/access-app-id annotation
+        │               ├─► App exists → skip; else CreateAccessApplication → write appID annotation
+        │               └─► SyncAccessPolicies (from access-policies annotation, every reconcile)
         │
         └─► PATCH Service (MergeFrom — only changed annotations)
             RequeueAfter: 5m
@@ -152,6 +165,7 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
         │       ├─► DeleteDNSRecord (if dns-record-id annotation present)
         │       │       └─► 404 from Cloudflare → treat as success (idempotent)
         │       ├─► RemoveIngress from ConfigMap
+        │       │       └─► ConfigMap changed? → RestartDeployment()
         │       └─► DeleteAccessApp (if access-app-id annotation present)
         │               └─► 404 from Cloudflare → treat as success
         │
@@ -168,19 +182,22 @@ When the annotation is removed or the Service is deleted, cloudflare-controller 
 ```go
 type ServiceReconciler struct {
     client.Client                  // Kubernetes API client (embedded)
-    Scheme             *runtime.Scheme
-    Recorder           record.EventRecorder
-    ConfigMgr          *configmap.Manager  // cloudflared ConfigMap manager
-    ConfigMapName      string
-    ConfigMapNamespace string
-    CFClient           cfc.Client          // Cloudflare API client (interface)
-    AccountID          string
-    ZoneID             string
-    TunnelID           string
+    Scheme               *runtime.Scheme
+    Recorder             record.EventRecorder
+    ConfigMgr            *configmap.Manager  // cloudflared ConfigMap manager
+    CloudflaredMgr       *cfd.Manager        // cloudflared infra manager (nil = infra-only mode)
+    ConfigMapName        string
+    ConfigMapNamespace   string
+    CFClient             cfc.Client          // Cloudflare API client (interface)
+    AccountID            string
+    ZoneID               string
+    TunnelID             string
 }
 ```
 
 All Cloudflare configuration is injected at startup as struct fields — there is no runtime re-reading of credentials or configuration. This means a pod restart is required to pick up config changes.
+
+`CloudflaredMgr` is `nil` when `credentialsSecret` is not configured (ingress-only mode). In this mode, the cloudflared Deployment and credentials Secret are managed externally.
 
 ### Watch predicate
 
@@ -254,7 +271,15 @@ Record ID is stored in `cloudflare-controller.io/dns-record-id` annotation for t
 
 The `EnsureAccessApp` function lists all Access Applications for the account and matches by `Domain`. If one already exists for the hostname, it returns the existing ID without creating a duplicate.
 
-The Access Application is only a shell — it enables Zero Trust protection but has no Access Policies configured by cloudflare-controller. Policies must be added manually in the Cloudflare dashboard or via separate tooling.
+### Access Policies
+
+`SyncAccessPolicies` is called on every reconcile when `access-enabled: "true"` is set. It:
+
+1. Lists all existing policies on the Access Application
+2. Deletes policies not present in the annotation
+3. Creates policies listed in the annotation that do not already exist (matched by name)
+
+This ensures the annotation is the source of truth for which policies are attached — adding or removing a policy name from the annotation takes effect on the next reconcile without manual Cloudflare dashboard intervention.
 
 ### Not-found handling
 
@@ -279,8 +304,10 @@ credentials-file: /etc/cloudflared/creds/credentials.json
 ingress:
   - hostname: app1.example.com
     service: http://app1.default.svc.cluster.local:8080
-  - hostname: app2.example.com
-    service: http://app2.apps.svc.cluster.local:3000
+  - hostname: grpc-app.example.com
+    service: http://grpc-app.apps.svc.cluster.local:4317
+    originRequest:
+      http2Origin: true
   - service: http_status:404    # catch-all — always last
 ```
 
@@ -304,9 +331,46 @@ attempt 1: GET ConfigMap (rv=101) → mutate → PATCH → success
 
 Maximum 3 attempts. If all 3 fail (highly contended ConfigMap), the reconcile returns an error and controller-runtime requeues with exponential backoff.
 
-### cloudflared hot reload
+### Deployment rolling restart
 
-cloudflared watches its mounted ConfigMap volume and reloads configuration when the file changes. Since Kubernetes propagates ConfigMap updates to mounted volumes within ~1 minute (kubelet sync period), ingress rule changes are picked up by cloudflared without a restart.
+When the ConfigMap content changes (detected by comparing old vs. new YAML), `RestartDeployment` is called. It patches the `kubectl.kubernetes.io/restartedAt` annotation on the pod template — the same mechanism as `kubectl rollout restart`. This triggers Kubernetes to perform a rolling restart of the cloudflared Deployment, picking up the new ingress rules immediately rather than waiting for the kubelet ConfigMap sync period (~1 minute).
+
+The `ensureDeployment` function preserves any existing pod template annotations (including `restartedAt`) when reconciling the Deployment spec, so legitimate restarts are never undone by subsequent reconcile iterations.
+
+---
+
+## cloudflared Infrastructure Management
+
+When `credentialsSecret` is configured, the controller manages all cloudflared infrastructure via `cloudflared.Manager` (in `internal/cloudflared/infra.go`).
+
+### Resources managed
+
+| Resource | Kind | Behaviour |
+|---|---|---|
+| `<credentialsSecret>` | `Secret` | `CreateOrUpdate` on every reconcile — keeps credentials in sync with config |
+| `<configMapName>` | `ConfigMap` | Created once with minimal base config; never overwritten if it exists |
+| `<deploymentName>` | `Deployment` | `CreateOrUpdate` — reconciles replica count and container image |
+
+### Base ConfigMap content
+
+On first creation, the ConfigMap is populated with:
+
+```yaml
+tunnel: <tunnelID>
+credentials-file: /etc/cloudflared/creds/credentials.json
+ingress:
+  - service: http_status:404
+```
+
+Subsequent reconciles leave the ConfigMap untouched (ingress rules are managed by `configmap.Manager`).
+
+### Deployment spec
+
+The cloudflared Deployment mounts:
+- `/etc/cloudflared/config` — the ConfigMap (config.yaml)
+- `/etc/cloudflared/creds` — the credentials Secret (credentials.json)
+
+The container runs: `cloudflared tunnel --config /etc/cloudflared/config/config.yaml --no-autoupdate run`
 
 ---
 
@@ -329,7 +393,9 @@ CLI flags  >  config file  >  built-in defaults
 ```go
 type Config struct {
     Cloudflare  CloudflareConfig  // accountID, zoneID, tunnelID
-    Cloudflared CloudflaredConfig // configMap.name, configMap.namespace
+    Cloudflared CloudflaredConfig // configMap.name, configMap.namespace,
+                                  // credentialsSecret, credentialsJSON,
+                                  // deploymentName, image, replicas
     MetricsBindAddress     string // default: ":8080"
     HealthProbeBindAddress string // default: ":8081"
     LeaderElect            bool   // default: false
@@ -377,17 +443,6 @@ The Secret itself is managed by [external-secrets](https://external-secrets.io) 
 
 The token is read once at startup from `os.Getenv("CLOUDFLARE_API_TOKEN")`. If the variable is empty, the process exits immediately with a non-zero code. The token is passed directly to `cf.NewWithAPIToken()` and held in memory for the lifetime of the process — it is never logged, written to disk, or included in any Kubernetes object.
 
-In Kubernetes, the token should be mounted from a Secret as an environment variable:
-
-```yaml
-env:
-  - name: CLOUDFLARE_API_TOKEN
-    valueFrom:
-      secretKeyRef:
-        name: <secret-name>
-        key: CLOUDFLARE_API_TOKEN
-```
-
 ---
 
 ## Error Handling and Retries
@@ -409,6 +464,8 @@ The controller emits `Warning` events on the Service object for every error path
 | `DNSFailed` | Cloudflare DNS API error |
 | `ConfigMapFailed` | cloudflared ConfigMap patch failed |
 | `AccessAppFailed` | Cloudflare Access API error |
+| `CloudflaredInfraFailed` | cloudflared Secret/ConfigMap/Deployment reconcile failed |
+| `CloudflaredRestartFailed` | cloudflared Deployment rolling restart failed |
 
 And `Normal` events for successful actions:
 
@@ -416,6 +473,7 @@ And `Normal` events for successful actions:
 |---|---|
 | `DNSRecordCreated` | DNS CNAME record created or confirmed |
 | `AccessAppCreated` | Access Application created |
+| `CloudflaredRestarted` | cloudflared Deployment restarted after ConfigMap change |
 
 Events are observable via `kubectl describe svc <name>` and are stored in Kubernetes for ~1 hour.
 
@@ -466,13 +524,15 @@ cloudflare-controller uses a `ClusterRole` because it watches Services across al
 |---|---|---|---|
 | `""` (core) | `services` | `get, list, watch, update, patch` | Watch annotated Services; write finalizer and status annotations |
 | `""` (core) | `services/finalizers` | `update` | Add/remove the cleanup finalizer |
-| `""` (core) | `configmaps` | `get, list, watch, update, patch` | Read and patch cloudflared config.yaml |
+| `""` (core) | `configmaps` | `get, list, watch, create, update, patch` | Read, create, and patch cloudflared config.yaml |
+| `""` (core) | `secrets` | `get, list, watch, create, update, patch` | Create and update cloudflared credentials Secret |
 | `""` (core) | `events` | `create, patch` | Emit reconcile events on Service objects |
+| `apps` | `deployments` | `get, list, watch, create, update, patch` | Create and reconcile the cloudflared Deployment |
 | `coordination.k8s.io` | `leases` | `get, list, watch, create, update, patch, delete` | Leader election (required when `leaderElect: true`) |
 
 ### ServiceAccount binding
 
-The `ClusterRoleBinding` maps the `ClusterRole` to the `cloudflare-controller-controller` ServiceAccount in the `cloudflared` namespace. The binding is cluster-scoped (ClusterRoleBinding, not RoleBinding) because the watch covers all namespaces.
+The `ClusterRoleBinding` maps the `ClusterRole` to the `cloudflare-controller` ServiceAccount in the `cloudflare-system` namespace. The binding is cluster-scoped (ClusterRoleBinding, not RoleBinding) because the watch covers all namespaces.
 
 ---
 
@@ -521,7 +581,7 @@ Stage 2 — runtime (gcr.io/distroless/static:nonroot)
 | `sigs.k8s.io/controller-runtime` | `v0.17.6` | Controller framework, manager, reconciler base |
 | `k8s.io/client-go` | `v0.29.15` | Kubernetes API client, event recorder |
 | `k8s.io/apimachinery` | `v0.29.15` | API types, errors, runtime |
-| `k8s.io/api` | `v0.29.15` | Core API types (Service, ConfigMap) |
+| `k8s.io/api` | `v0.29.15` | Core API types (Service, ConfigMap, Secret, Deployment) |
 | `github.com/cloudflare/cloudflare-go` | `v0.115.0` | Cloudflare API client |
 | `gopkg.in/yaml.v3` | `v3.0.1` | cloudflared config.yaml parsing |
 | `go.uber.org/zap` | (transitive) | Structured logging via controller-runtime/zap |
@@ -531,9 +591,8 @@ Stage 2 — runtime (gcr.io/distroless/static:nonroot)
 | System | How used |
 |---|---|
 | Cloudflare DNS API | Create/update/delete CNAME records |
-| Cloudflare Zero Trust API | Create/delete Access Applications |
-| Kubernetes API Server | Watch Services, patch ConfigMap, write events |
-| Kubernetes API Server | Watch Services, patch ConfigMap, write events |
+| Cloudflare Zero Trust API | Create/delete Access Applications; sync Access Policies |
+| Kubernetes API Server | Watch Services; create/patch ConfigMap, Secret, Deployment; write events |
 
 ---
 
@@ -575,6 +634,10 @@ All Cloudflare API operations are designed to be idempotent:
 
 This allows the reconcile loop to run at any frequency without accumulating duplicate resources in Cloudflare.
 
+### Rolling restart on ConfigMap change
+
+Rather than relying on the kubelet ConfigMap volume sync period (~1 minute), the controller explicitly triggers a rolling restart when the ConfigMap changes. This ensures cloudflared picks up new ingress rules immediately. The rolling restart uses the `kubectl.kubernetes.io/restartedAt` pod template annotation — the same mechanism as `kubectl rollout restart` — to avoid disrupting in-flight connections.
+
 ---
 
 ## Known Limitations
@@ -582,14 +645,6 @@ This allows the reconcile loop to run at any frequency without accumulating dupl
 ### CloudFlared ConfigMap format coupling
 
 cloudflare-controller parses cloudflared's `config.yaml` format. If cloudflared changes its configuration schema in a future version, the `cloudflaredConfig` struct in `internal/configmap/manager.go` may need to be updated. The `Tunnel` and `CredentialsFile` fields are preserved through round-trip marshal/unmarshal but never modified.
-
-### No Access Policy management
-
-cloudflare-controller creates Cloudflare Access Applications but does not create Access Policies. A freshly created Access Application allows no traffic by default — policies must be configured manually. This is intentional (policy configuration is complex and organisation-specific) but may surprise users expecting full Zero Trust setup from the annotation alone.
-
-### ConfigMap must pre-exist
-
-cloudflare-controller does not create the cloudflared ConfigMap — it only patches an existing one. If the ConfigMap does not exist, `UpsertIngress` returns an error and the reconcile fails. The ConfigMap must be created by cloudflared's initial deployment before cloudflare-controller can manage it.
 
 ### Single controller instance (no HA by default)
 
@@ -602,3 +657,7 @@ The cleanup path runs on the next reconcile after annotation removal. If the con
 ### No pagination on Cloudflare API list calls
 
 `EnsureDNSRecord` and `EnsureAccessApp` use un-paginated list calls. For zones with thousands of DNS records or accounts with hundreds of Access Applications, the first page may not contain the target record, resulting in false "not found" — and a duplicate resource being created. In practice this is not an issue for small to medium deployments.
+
+### Access Policy sync requires exact name match
+
+`SyncAccessPolicies` matches existing policies by name. If a policy is renamed in the Cloudflare dashboard without updating the annotation, the old policy will be deleted and a new one created. Policy names in the annotation must exactly match the configured policy names.
