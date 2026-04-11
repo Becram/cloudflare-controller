@@ -1,9 +1,10 @@
-module github.com/bikramdhoju/rector
+module github.com/bikramdhoju/cloudflare-controller
 
 go 1.22.5
 
 require (
 	github.com/cloudflare/cloudflare-go v0.115.0
+	go.uber.org/zap v1.26.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.29.15
 	k8s.io/apimachinery v0.29.15
@@ -47,7 +48,6 @@ require (
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/oauth2 v0.12.0 // indirect

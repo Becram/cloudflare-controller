@@ -1,4 +1,4 @@
-IMG ?= rector-controller:latest
+IMG ?= cloudflare-controller:latest
 CONTROLLER_GEN_VERSION ?= v0.14.0
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
@@ -13,7 +13,7 @@ generate:
 ## manifests: Regenerate CRD and RBAC manifests from markers
 manifests:
 	$(CONTROLLER_GEN) \
-		rbac:roleName=rector-manager-role \
+		rbac:roleName=cloudflare-controller-manager-role \
 		crd \
 		paths="./..." \
 		output:crd:artifacts:config=config/crd \

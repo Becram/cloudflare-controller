@@ -1,4 +1,4 @@
-# Rector — Technical Architecture
+# cloudflare-controller — Technical Architecture
 
 ## Table of Contents
 
@@ -22,19 +22,19 @@
 
 ## System Overview
 
-Rector is a Kubernetes controller built on [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) that bridges Kubernetes Services to [Cloudflare Argo Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It eliminates the need to manually manage DNS records, tunnel ingress rules, or Cloudflare Zero Trust applications when deploying services behind an Argo Tunnel.
+cloudflare-controller is a Kubernetes controller built on [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) that bridges Kubernetes Services to [Cloudflare Argo Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It eliminates the need to manually manage DNS records, tunnel ingress rules, or Cloudflare Zero Trust applications when deploying services behind an Argo Tunnel.
 
-### What rector does
+### What cloudflare-controller does
 
-When a Kubernetes Service is annotated with `cloudflare.rector.io/hostname`, rector:
+When a Kubernetes Service is annotated with `cloudflare-controller.io/hostname`, cloudflare-controller:
 
 1. Creates a proxied **CNAME DNS record** in Cloudflare DNS: `<hostname> → <tunnelID>.cfargotunnel.com`
 2. Upserts an **ingress rule** in the cloudflared ConfigMap: `<hostname> → http://<svc>.<ns>.svc.cluster.local:<port>`
 3. Optionally creates a **Cloudflare Zero Trust Access Application** for the hostname
 
-When the annotation is removed or the Service is deleted, rector reverses all three operations in a guaranteed cleanup sequence enforced by a Kubernetes finalizer.
+When the annotation is removed or the Service is deleted, cloudflare-controller reverses all three operations in a guaranteed cleanup sequence enforced by a Kubernetes finalizer.
 
-### What rector does NOT do
+### What cloudflare-controller does NOT do
 
 - Does not create or manage the Argo Tunnel itself (tunnel must pre-exist)
 - Does not manage cloudflared deployment or credentials
@@ -59,7 +59,7 @@ When the annotation is removed or the Service is deleted, rector reverses all th
 │  │  └─────────────────────────┘    │   │                          │   │
 │  │                                  │   │  ingress:               │   │
 │  │  ┌─────────────────────────┐    │   │  - hostname: app.ex.com │   │
-│  │  │  rector-controller      │────┼──►│    service: http://...  │   │
+│  │  │  cloudflare-controller-controller      │────┼──►│    service: http://...  │   │
 │  │  │  (this controller)      │    │   │  - service: http_status │   │
 │  │  └──────────┬──────────────┘    │   │             :404        │   │
 │  │             │                    │   └──────────────────────────┘   │
@@ -70,11 +70,11 @@ When the annotation is removed or the Service is deleted, rector reverses all th
 │  │  All Namespaces                                                   │   │
 │  │                                                                   │   │
 │  │  Service (annotated)                                              │   │
-│  │    cloudflare.rector.io/hostname: "app.example.com"              │   │
-│  │    cloudflare.rector.io/port: "8080"          (optional)         │   │
-│  │    cloudflare.rector.io/access-enabled: "true" (optional)        │   │
-│  │    cloudflare.rector.io/dns-record-id: "<id>" (written back)     │   │
-│  │    cloudflare.rector.io/access-app-id: "<id>" (written back)     │   │
+│  │    cloudflare-controller.io/hostname: "app.example.com"              │   │
+│  │    cloudflare-controller.io/port: "8080"          (optional)         │   │
+│  │    cloudflare-controller.io/access-enabled: "true" (optional)        │   │
+│  │    cloudflare-controller.io/dns-record-id: "<id>" (written back)     │   │
+│  │    cloudflare-controller.io/access-app-id: "<id>" (written back)     │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
                 │
@@ -103,7 +103,7 @@ When the annotation is removed or the Service is deleted, rector reverses all th
 1. User annotates Service
         │
         ▼
-2. API Server notifies rector via watch (predicate filters unannotated Services)
+2. API Server notifies cloudflare-controller via watch (predicate filters unannotated Services)
         │
         ▼
 3. ServiceReconciler.Reconcile() called
@@ -119,7 +119,7 @@ When the annotation is removed or the Service is deleted, rector reverses all th
         │       ├─► Record exists with correct target → return recordID (no-op)
         │       ├─► Record exists with wrong target → UpdateDNSRecord → return recordID
         │       └─► Record absent → CreateDNSRecord → return recordID
-        │           Writes cloudflare.rector.io/dns-record-id annotation
+        │           Writes cloudflare-controller.io/dns-record-id annotation
         │
         ├─► ConfigMgr.UpsertIngress()
         │       ├─► GET ConfigMap from API Server
@@ -134,7 +134,7 @@ When the annotation is removed or the Service is deleted, rector reverses all th
         │               ├─► ListAccessApplications — match by domain
         │               ├─► App exists → return appID (no-op)
         │               └─► App absent → CreateAccessApplication → return appID
-        │                   Writes cloudflare.rector.io/access-app-id annotation
+        │                   Writes cloudflare-controller.io/access-app-id annotation
         │
         └─► PATCH Service (MergeFrom — only changed annotations)
             RequeueAfter: 5m
@@ -188,20 +188,20 @@ The controller uses a compound predicate to avoid reconciling every Service in t
 
 ```go
 predicate.Or(
-    hasAnnotationOrFinalizer,          // Service has hostname annotation OR rector finalizer
+    hasAnnotationOrFinalizer,          // Service has hostname annotation OR cloudflare-controller finalizer
     predicate.AnnotationChangedPredicate{}, // Any annotation change on the Service
 )
 ```
 
 `hasAnnotationOrFinalizer` returns `true` if:
-- `cloudflare.rector.io/hostname` annotation is present, OR
-- `cloudflare.rector.io/finalizer` finalizer is present (needed to process deletions)
+- `cloudflare-controller.io/hostname` annotation is present, OR
+- `cloudflare-controller.io/finalizer` finalizer is present (needed to process deletions)
 
 `AnnotationChangedPredicate` ensures the controller picks up the moment a hostname annotation is added to a Service that previously had none.
 
 ### Finalizer pattern
 
-The finalizer `cloudflare.rector.io/finalizer` is added to every Service before any external mutation. This guarantees:
+The finalizer `cloudflare-controller.io/finalizer` is added to every Service before any external mutation. This guarantees:
 
 1. Kubernetes will not physically delete the Service object until the finalizer is removed
 2. The controller always gets a chance to clean up Cloudflare resources before the Service disappears
@@ -236,7 +236,7 @@ The controller requeues every **5 minutes** (`requeueAfter = 5 * time.Minute`) t
 - **Content**: `<tunnelID>.cfargotunnel.com`
 - **TTL**: `1` (auto / proxied)
 - **Proxied**: `true` (traffic goes through Cloudflare proxy)
-- **Comment**: `managed by rector`
+- **Comment**: `managed by cloudflare-controller`
 
 The `EnsureDNSRecord` function is idempotent:
 - Lists existing CNAME records for the hostname
@@ -244,7 +244,7 @@ The `EnsureDNSRecord` function is idempotent:
 - If a record exists with a different target → updates it (handles tunnel migration)
 - If no record exists → creates it
 
-Record ID is stored in `cloudflare.rector.io/dns-record-id` annotation for targeted deletion. Without the ID, deletion would require a list+filter API call.
+Record ID is stored in `cloudflare-controller.io/dns-record-id` annotation for targeted deletion. Without the ID, deletion would require a list+filter API call.
 
 ### Cloudflare Access Application
 
@@ -254,7 +254,7 @@ Record ID is stored in `cloudflare.rector.io/dns-record-id` annotation for targe
 
 The `EnsureAccessApp` function lists all Access Applications for the account and matches by `Domain`. If one already exists for the hostname, it returns the existing ID without creating a duplicate.
 
-The Access Application is only a shell — it enables Zero Trust protection but has no Access Policies configured by rector. Policies must be added manually in the Cloudflare dashboard or via separate tooling.
+The Access Application is only a shell — it enables Zero Trust protection but has no Access Policies configured by cloudflare-controller. Policies must be added manually in the Cloudflare dashboard or via separate tooling.
 
 ### Not-found handling
 
@@ -269,7 +269,7 @@ Cloudflare error codes treated as "not found":
 
 ## ConfigMap Management
 
-The cloudflared daemon reads its configuration from a `config.yaml` key in a Kubernetes ConfigMap. Rector directly mutates this ConfigMap to add and remove ingress rules.
+The cloudflared daemon reads its configuration from a `config.yaml` key in a Kubernetes ConfigMap. cloudflare-controller directly mutates this ConfigMap to add and remove ingress rules.
 
 ### ConfigMap structure
 
@@ -284,9 +284,9 @@ ingress:
   - service: http_status:404    # catch-all — always last
 ```
 
-### Invariants maintained by rector
+### Invariants maintained by cloudflare-controller
 
-1. **Catch-all rule is always last**: cloudflared requires a catch-all entry as the final ingress rule. Rector enforces this on every write by calling `insertBeforeCatchAll`.
+1. **Catch-all rule is always last**: cloudflared requires a catch-all entry as the final ingress rule. cloudflare-controller enforces this on every write by calling `insertBeforeCatchAll`.
 2. **No duplicate rules**: before inserting a rule, `removeByHostname` removes any existing rule for that hostname. This makes `UpsertIngress` idempotent.
 3. **Catch-all is never removed**: `removeByHostname` matches on `Hostname` field — the catch-all has an empty `Hostname`, so it is never removed by hostname-based operations.
 
@@ -367,7 +367,7 @@ env:
   - name: CLOUDFLARE_API_TOKEN
     valueFrom:
       secretKeyRef:
-        name: rector-config
+        name: cloudflare-controller-config
         key: CLOUDFLARE_API_TOKEN
 ```
 
@@ -448,7 +448,7 @@ All reconcile log lines include controller-runtime's standard context fields:
 - `namespace` / `name` — the Service being reconciled
 - `reconcileID` — unique UUID per reconcile invocation (useful for tracing)
 
-Additional fields added by rector:
+Additional fields added by cloudflare-controller:
 - `hostname` — the Cloudflare hostname being managed
 - `backendURL` — the in-cluster service URL
 - `recordID` / `appID` — Cloudflare resource identifiers
@@ -458,7 +458,7 @@ Additional fields added by rector:
 
 ## RBAC Model
 
-Rector uses a `ClusterRole` because it watches Services across all namespaces and manages a ConfigMap in a specific namespace (cloudflared).
+cloudflare-controller uses a `ClusterRole` because it watches Services across all namespaces and manages a ConfigMap in a specific namespace (cloudflared).
 
 ### Permissions required
 
@@ -472,7 +472,7 @@ Rector uses a `ClusterRole` because it watches Services across all namespaces an
 
 ### ServiceAccount binding
 
-The `ClusterRoleBinding` maps the `ClusterRole` to the `rector-controller` ServiceAccount in the `cloudflared` namespace. The binding is cluster-scoped (ClusterRoleBinding, not RoleBinding) because the watch covers all namespaces.
+The `ClusterRoleBinding` maps the `ClusterRole` to the `cloudflare-controller-controller` ServiceAccount in the `cloudflared` namespace. The binding is cluster-scoped (ClusterRoleBinding, not RoleBinding) because the watch covers all namespaces.
 
 ---
 
@@ -560,11 +560,11 @@ Single-tunnel was chosen because the primary use case is a homelab/small cluster
 
 ### ConfigMap as ingress source of truth
 
-Rector writes ingress rules directly to the cloudflared ConfigMap rather than managing a separate Ingress object. This keeps cloudflared's configuration format intact and avoids adding a translation layer. The downside is that rector must parse and maintain cloudflared's YAML format, which is tightly coupled to cloudflared's config schema.
+cloudflare-controller writes ingress rules directly to the cloudflared ConfigMap rather than managing a separate Ingress object. This keeps cloudflared's configuration format intact and avoids adding a translation layer. The downside is that cloudflare-controller must parse and maintain cloudflared's YAML format, which is tightly coupled to cloudflared's config schema.
 
 ### client.MergeFrom for annotation writes
 
-Using `client.MergeFrom` (strategic merge patch) instead of `Update` ensures rector only writes the fields it owns. A full `Update` would send the entire object, potentially overwriting concurrent changes by other controllers (e.g., ArgoCD reconciling Service labels, Prometheus adding scrape annotations). The merge patch sends only the changed fields.
+Using `client.MergeFrom` (strategic merge patch) instead of `Update` ensures cloudflare-controller only writes the fields it owns. A full `Update` would send the entire object, potentially overwriting concurrent changes by other controllers (e.g., ArgoCD reconciling Service labels, Prometheus adding scrape annotations). The merge patch sends only the changed fields.
 
 ### Idempotent Cloudflare operations
 
@@ -581,15 +581,15 @@ This allows the reconcile loop to run at any frequency without accumulating dupl
 
 ### CloudFlared ConfigMap format coupling
 
-Rector parses cloudflared's `config.yaml` format. If cloudflared changes its configuration schema in a future version, the `cloudflaredConfig` struct in `internal/configmap/manager.go` may need to be updated. The `Tunnel` and `CredentialsFile` fields are preserved through round-trip marshal/unmarshal but never modified.
+cloudflare-controller parses cloudflared's `config.yaml` format. If cloudflared changes its configuration schema in a future version, the `cloudflaredConfig` struct in `internal/configmap/manager.go` may need to be updated. The `Tunnel` and `CredentialsFile` fields are preserved through round-trip marshal/unmarshal but never modified.
 
 ### No Access Policy management
 
-Rector creates Cloudflare Access Applications but does not create Access Policies. A freshly created Access Application allows no traffic by default — policies must be configured manually. This is intentional (policy configuration is complex and organisation-specific) but may surprise users expecting full Zero Trust setup from the annotation alone.
+cloudflare-controller creates Cloudflare Access Applications but does not create Access Policies. A freshly created Access Application allows no traffic by default — policies must be configured manually. This is intentional (policy configuration is complex and organisation-specific) but may surprise users expecting full Zero Trust setup from the annotation alone.
 
 ### ConfigMap must pre-exist
 
-Rector does not create the cloudflared ConfigMap — it only patches an existing one. If the ConfigMap does not exist, `UpsertIngress` returns an error and the reconcile fails. The ConfigMap must be created by cloudflared's initial deployment before rector can manage it.
+cloudflare-controller does not create the cloudflared ConfigMap — it only patches an existing one. If the ConfigMap does not exist, `UpsertIngress` returns an error and the reconcile fails. The ConfigMap must be created by cloudflared's initial deployment before cloudflare-controller can manage it.
 
 ### Single controller instance (no HA by default)
 

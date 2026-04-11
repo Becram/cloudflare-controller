@@ -16,11 +16,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cfc "github.com/bikramdhoju/rector/internal/cloudflare"
-	cfd "github.com/bikramdhoju/rector/internal/cloudflared"
-	"github.com/bikramdhoju/rector/internal/config"
-	"github.com/bikramdhoju/rector/internal/configmap"
-	"github.com/bikramdhoju/rector/internal/controller"
+	cfc "github.com/bikramdhoju/cloudflare-controller/internal/cloudflare"
+	cfd "github.com/bikramdhoju/cloudflare-controller/internal/cloudflared"
+	"github.com/bikramdhoju/cloudflare-controller/internal/config"
+	"github.com/bikramdhoju/cloudflare-controller/internal/configmap"
+	"github.com/bikramdhoju/cloudflare-controller/internal/controller"
 )
 
 var scheme = runtime.NewScheme()
@@ -121,7 +121,7 @@ func main() {
 	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	ctrl.Log.Info("starting rector cloudflare controller",
+	ctrl.Log.Info("starting cloudflare-controller",
 		"config", configFile,
 		"logLevel", cfg.LogLevel,
 	)
@@ -151,7 +151,7 @@ func main() {
 		},
 		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
 		LeaderElection:         cfg.LeaderElect,
-		LeaderElectionID:       "rector.apps.rector.io",
+		LeaderElectionID:       "cloudflare-controller.apps.cloudflare-controller.io",
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to create manager")
@@ -176,7 +176,7 @@ func main() {
 	if err := (&controller.ServiceReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
-		Recorder:             mgr.GetEventRecorderFor("rector-cloudflare-controller"),
+		Recorder:             mgr.GetEventRecorderFor("cloudflare-controller"),
 		ConfigMgr:            configmap.New(mgr.GetClient()),
 		CloudflaredMgr:       cloudflaredMgr,
 		ConfigMapName:        cfg.Cloudflared.ConfigMap.Name,

@@ -12,7 +12,7 @@ resources:
 
 # Mount controller-config.yaml as a ConfigMap
 configMapGenerator:
-  - name: rector-controller-config
+  - name: cloudflare-controller-config
     files:
       - config.yaml=controller-config.yaml
     options:
@@ -21,13 +21,13 @@ configMapGenerator:
 # CLOUDFLARE_API_TOKEN — populate secret.env before applying.
 # Never commit a real token; use CI/CD secret injection or a secrets manager.
 secretGenerator:
-  - name: rector-cloudflare-token
+  - name: cloudflare-controller-token
     envs:
       - secret.env
     options:
       disableNameSuffixHash: true
 
 images:
-  - name: rector-controller
-    newName: rector-controller
+  - name: cloudflare-controller
+    newName: cloudflare-controller
     newTag: latest

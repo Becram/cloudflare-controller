@@ -1,6 +1,6 @@
-# Rector — Cloudflare Argo Tunnel Controller
+# cloudflare-controller — Cloudflare Argo Tunnel Controller
 
-Rector is a Kubernetes controller that watches `Service` objects annotated with `cloudflare.rector.io/hostname` and automatically manages the corresponding Cloudflare resources: a DNS CNAME record, a cloudflared ingress rule in a ConfigMap, and (optionally) a Cloudflare Zero Trust Access Application.
+cloudflare-controller is a Kubernetes controller that watches `Service` objects annotated with `cloudflare-controller.io/hostname` and automatically manages the corresponding Cloudflare resources: a DNS CNAME record, a cloudflared ingress rule in a ConfigMap, and (optionally) a Cloudflare Zero Trust Access Application.
 
 ---
 
@@ -39,7 +39,7 @@ A Cloudflare account with an existing **Argo Tunnel** (cloudflared) is required.
 ## Project Structure
 
 ```
-rector/
+cloudflare-controller/
 ├── internal/
 │   ├── cloudflare/
 │   │   └── client.go          # Cloudflare API client interface + cloudflare-go implementation
@@ -84,7 +84,7 @@ rector/
 
 ### Lifecycle
 
-The controller adds a finalizer (`cloudflare.rector.io/finalizer`) to every annotated Service before making any external changes. On Service deletion or annotation removal, the reconciler cleans up all Cloudflare resources before removing the finalizer.
+The controller adds a finalizer (`cloudflare-controller.io/finalizer`) to every annotated Service before making any external changes. On Service deletion or annotation removal, the reconciler cleans up all Cloudflare resources before removing the finalizer.
 
 ### ConfigMap management
 
@@ -98,16 +98,16 @@ The cloudflared `ConfigMap` (identified by `--cloudflared-configmap-name` / `--c
 
 | Annotation | Required | Description |
 |---|---|---|
-| `cloudflare.rector.io/hostname` | Yes | Public hostname to expose (e.g. `app.example.com`). Presence triggers the controller. |
-| `cloudflare.rector.io/port` | No | Service port to use as the backend. Defaults to the first port in `spec.ports`. |
-| `cloudflare.rector.io/access-enabled` | No | Set to `"true"` to create a Cloudflare Zero Trust Access Application for this hostname. |
+| `cloudflare-controller.io/hostname` | Yes | Public hostname to expose (e.g. `app.example.com`). Presence triggers the controller. |
+| `cloudflare-controller.io/port` | No | Service port to use as the backend. Defaults to the first port in `spec.ports`. |
+| `cloudflare-controller.io/access-enabled` | No | Set to `"true"` to create a Cloudflare Zero Trust Access Application for this hostname. |
 
 ### Status annotations (written by the controller)
 
 | Annotation | Description |
 |---|---|
-| `cloudflare.rector.io/dns-record-id` | Cloudflare DNS record ID for the CNAME (stored for cleanup). |
-| `cloudflare.rector.io/access-app-id` | Cloudflare Access Application ID (stored for cleanup). |
+| `cloudflare-controller.io/dns-record-id` | Cloudflare DNS record ID for the CNAME (stored for cleanup). |
+| `cloudflare-controller.io/access-app-id` | Cloudflare Access Application ID (stored for cleanup). |
 
 ---
 
@@ -126,7 +126,7 @@ Reconcile(req)
     │
     ├─ reconcileDNS()
     │     └─ EnsureDNSRecord: list existing CNAMEs → update if drifted, create if absent
-    │         Writes cloudflare.rector.io/dns-record-id annotation
+    │         Writes cloudflare-controller.io/dns-record-id annotation
     │
     ├─ ConfigMgr.UpsertIngress()
     │     └─ Parse cloudflared config.yaml from ConfigMap → upsert rule → marshal back
@@ -227,9 +227,9 @@ make vet
 ```bash
 kubectl apply -f config/rbac/role.yaml
 
-kubectl create clusterrolebinding rector-manager-rolebinding \
-  --clusterrole=rector-manager-role \
-  --serviceaccount=cloudflare-system:rector-controller
+kubectl create clusterrolebinding cloudflare-controller-manager-rolebinding \
+  --clusterrole=cloudflare-controller-manager-role \
+  --serviceaccount=cloudflare-system:cloudflare-controller
 ```
 
 ### 2. Create the API token Secret
@@ -243,8 +243,8 @@ kubectl create secret generic cloudflare-api-token \
 ### 3. Build and push the image
 
 ```bash
-make docker-build IMG=your-registry/rector-controller:v0.1.0
-docker push your-registry/rector-controller:v0.1.0
+make docker-build IMG=your-registry/cloudflare-controller:v0.1.0
+docker push your-registry/cloudflare-controller:v0.1.0
 ```
 
 ### 4. Deploy the manager
@@ -253,24 +253,24 @@ docker push your-registry/rector-controller:v0.1.0
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rector-controller-manager
+  name: cloudflare-controller-manager
   namespace: cloudflare-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: rector-controller-manager
+      app: cloudflare-controller-manager
   template:
     metadata:
       labels:
-        app: rector-controller-manager
+        app: cloudflare-controller-manager
     spec:
-      serviceAccountName: rector-controller
+      serviceAccountName: cloudflare-controller
       containers:
         - name: manager
-          image: your-registry/rector-controller:v0.1.0
+          image: your-registry/cloudflare-controller:v0.1.0
           args:
-            - --config=/etc/rector/config.yaml
+            - --config=/etc/cloudflare-controller/config.yaml
           env:
             - name: CLOUDFLARE_API_TOKEN
               valueFrom:
@@ -279,7 +279,7 @@ spec:
                   key: CLOUDFLARE_API_TOKEN
           volumeMounts:
             - name: config
-              mountPath: /etc/rector
+              mountPath: /etc/cloudflare-controller
               readOnly: true
           ports:
             - name: metrics
@@ -299,7 +299,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: rector-controller-config
+            name: cloudflare-controller-config
 ```
 
 ---
@@ -326,9 +326,9 @@ metadata:
   name: my-app
   namespace: default
   annotations:
-    cloudflare.rector.io/hostname: "my-app.example.com"
-    cloudflare.rector.io/port: "8080"          # optional; defaults to first port
-    cloudflare.rector.io/access-enabled: "true" # optional; creates Access Application
+    cloudflare-controller.io/hostname: "my-app.example.com"
+    cloudflare-controller.io/port: "8080"          # optional; defaults to first port
+    cloudflare-controller.io/access-enabled: "true" # optional; creates Access Application
 spec:
   selector:
     app: my-app
@@ -343,7 +343,7 @@ The controller will:
 2. Add an ingress rule to the cloudflared ConfigMap: `my-app.example.com → http://my-app.default.svc.cluster.local:8080`
 3. Create a Cloudflare Zero Trust Access Application for `my-app.example.com`
 
-To stop managing: remove the `cloudflare.rector.io/hostname` annotation. The controller will delete the DNS record, remove the ingress rule, delete the Access Application, then remove the finalizer.
+To stop managing: remove the `cloudflare-controller.io/hostname` annotation. The controller will delete the DNS record, remove the ingress rule, delete the Access Application, then remove the finalizer.
 
 ---
 

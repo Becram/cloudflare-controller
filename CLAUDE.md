@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make build             # compile bin/manager (runs fmt + vet first)
 make run               # run controller locally against current kubeconfig
 make test              # go test -race ./... with coverage report
-make docker-build      # build controller image (IMG=rector-controller:latest)
+make docker-build      # build controller image (IMG=cloudflare-controller:latest)
 ```
 
 Run a single test:
@@ -18,7 +18,7 @@ go test -race -run TestReconcile ./internal/controller/...
 
 ## Architecture
 
-No custom CRDs. The controller watches standard `core/v1` **Services** for `cloudflare.rector.io/*` annotations and manages external Cloudflare resources in response.
+No custom CRDs. The controller watches standard `core/v1` **Services** for `cloudflare-controller.io/*` annotations and manages external Cloudflare resources in response.
 
 ```
 internal/
@@ -45,7 +45,7 @@ config/
 ## Key implementation notes
 
 - **No CRDs.** All config is injected into `ServiceReconciler` as struct fields at startup (from YAML file + flag overrides + `CLOUDFLARE_API_TOKEN` env var).
-- **Finalizer** `cloudflare.rector.io/finalizer` is added before any external mutations; cleanup runs on deletion or hostname annotation removal.
+- **Finalizer** `cloudflare-controller.io/finalizer` is added before any external mutations; cleanup runs on deletion or hostname annotation removal.
 - **Annotation patch** uses `client.MergeFrom` so only changed annotations are written back — avoids clobbering other controllers.
 - **ConfigMap retry**: `configmap.Manager` retries up to 3× on `409 Conflict` (optimistic locking).
 - **CLOUDFLARE_API_TOKEN** is never in the config file — always from env var, mounted from a Kubernetes Secret.

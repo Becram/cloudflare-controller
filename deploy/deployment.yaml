@@ -1,39 +1,39 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rector-controller-manager
+  name: cloudflare-controller-manager
   namespace: cloudflare-system
   labels:
-    app: rector-controller-manager
+    app: cloudflare-controller-manager
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: rector-controller-manager
+      app: cloudflare-controller-manager
   template:
     metadata:
       labels:
-        app: rector-controller-manager
+        app: cloudflare-controller-manager
     spec:
-      serviceAccountName: rector-controller
+      serviceAccountName: cloudflare-controller
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: rector-controller:latest
+          image: cloudflare-controller:latest
           args:
-            - --config=/etc/rector/config.yaml
+            - --config=/etc/cloudflare-controller/config.yaml
           env:
             - name: CLOUDFLARE_API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: rector-cloudflare-token
+                  name: cloudflare-controller-token
                   key: CLOUDFLARE_API_TOKEN
           volumeMounts:
             - name: controller-config
-              mountPath: /etc/rector
+              mountPath: /etc/cloudflare-controller
               readOnly: true
           ports:
             - name: metrics
@@ -70,4 +70,4 @@ spec:
       volumes:
         - name: controller-config
           configMap:
-            name: rector-controller-config
+            name: cloudflare-controller-config

@@ -17,24 +17,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	cfc "github.com/bikramdhoju/rector/internal/cloudflare"
-	cfd "github.com/bikramdhoju/rector/internal/cloudflared"
-	"github.com/bikramdhoju/rector/internal/configmap"
+	cfc "github.com/bikramdhoju/cloudflare-controller/internal/cloudflare"
+	cfd "github.com/bikramdhoju/cloudflare-controller/internal/cloudflared"
+	"github.com/bikramdhoju/cloudflare-controller/internal/configmap"
 )
 
 const (
-	AnnotationHostname      = "cloudflare.rector.io/hostname"
-	AnnotationPort          = "cloudflare.rector.io/port"
-	AnnotationAccessEnabled = "cloudflare.rector.io/access-enabled"
-	AnnotationAccessPolicies = "cloudflare.rector.io/access-policies"
-	AnnotationDNSRecordID   = "cloudflare.rector.io/dns-record-id"
-	AnnotationAccessAppID   = "cloudflare.rector.io/access-app-id"
-	Finalizer               = "cloudflare.rector.io/finalizer"
+	AnnotationHostname      = "cloudflare-controller.io/hostname"
+	AnnotationPort          = "cloudflare-controller.io/port"
+	AnnotationAccessEnabled = "cloudflare-controller.io/access-enabled"
+	AnnotationAccessPolicies = "cloudflare-controller.io/access-policies"
+	AnnotationDNSRecordID   = "cloudflare-controller.io/dns-record-id"
+	AnnotationAccessAppID   = "cloudflare-controller.io/access-app-id"
+	Finalizer               = "cloudflare-controller.io/finalizer"
 
 	requeueAfter = 5 * time.Minute
 )
 
-// ServiceReconciler watches Services for cloudflare.rector.io annotations and
+// ServiceReconciler watches Services for cloudflare-controller.io annotations and
 // manages the corresponding Cloudflare DNS records, cloudflared ConfigMap ingress
 // rules, and (optionally) Cloudflare Access Applications.
 //

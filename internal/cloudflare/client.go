@@ -1,5 +1,5 @@
 // Package cloudflare wraps the cloudflare-go SDK with the operations
-// needed by the rector controller: idempotent DNS record management
+// needed by the cloudflare-controller: idempotent DNS record management
 // and Cloudflare Access Application lifecycle.
 package cloudflare
 
@@ -14,7 +14,7 @@ import (
 )
 
 // PolicySpec describes a single Access Policy to attach to an Access Application.
-// The Raw field is one entry from the cloudflare.rector.io/access-policies annotation,
+// The Raw field is one entry from the cloudflare-controller.io/access-policies annotation,
 // e.g. "service-token", "email:user@example.com", "email-domain:example.com".
 type PolicySpec struct {
 	Raw string
@@ -141,7 +141,7 @@ func (c *cfClient) EnsureDNSRecord(ctx context.Context, zoneID, hostname, tunnel
 		Content: target,
 		TTL:     1,
 		Proxied: cf.BoolPtr(true),
-		Comment: "managed by rector",
+		Comment: "managed by cloudflare-controller",
 	})
 	if err != nil {
 		return "", fmt.Errorf("creating DNS record for %s: %w", hostname, err)
