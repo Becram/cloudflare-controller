@@ -37,10 +37,10 @@ func ParsePolicies(annotation string) []PolicySpec {
 	return out
 }
 
-// name returns the deterministic Cloudflare policy name for this spec.
-// The "rector:" prefix lets the controller distinguish managed policies from
-// manually created ones when syncing.
-func (p PolicySpec) name() string { return "rector:" + p.Raw }
+// name returns the Cloudflare policy name for this spec.
+// The spec raw value is used directly so the controller matches existing
+// policies that share the same name (e.g. a pre-existing "service-token" policy).
+func (p PolicySpec) name() string { return p.Raw }
 
 // decision returns the Cloudflare Access decision for this policy type.
 // Service-token policies use non_identity; all others use allow.
@@ -79,9 +79,8 @@ type Client interface {
 	DeleteDNSRecord(ctx context.Context, zoneID, recordID string) error
 	EnsureAccessApp(ctx context.Context, accountID, hostname string) (appID string, err error)
 	DeleteAccessApp(ctx context.Context, accountID, appID string) error
-	// SyncAccessPolicies reconciles the desired set of policies on the given Access
-	// Application. It creates missing policies, removes stale rector-managed ones,
-	// and leaves manually created (non-rector:) policies untouched.
+	// SyncAccessPolicies ensures all desired policies exist on the Access Application,
+	// matching by name. Existing policies (including pre-created ones) are never deleted.
 	SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error
 }
 
@@ -213,9 +212,10 @@ func (c *cfClient) DeleteAccessApp(ctx context.Context, accountID, appID string)
 	return nil
 }
 
-// SyncAccessPolicies reconciles the desired policies on an Access Application.
-// Policies are matched by name (prefix "rector:"). Missing ones are created,
-// stale managed ones are deleted; any non-rector: policies are left intact.
+// SyncAccessPolicies ensures all desired policies exist on the Access Application.
+// Policies are matched by name (the spec raw value). Missing ones are created;
+// existing ones are left as-is. No policies are ever deleted — removal must be
+// done manually since the controller cannot distinguish owned from pre-existing policies.
 func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error {
 	logger := log.FromContext(ctx).WithValues("accountID", accountID, "appID", appID)
 
@@ -256,23 +256,6 @@ func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID stri
 			return fmt.Errorf("creating access policy %q: %w", name, err)
 		}
 		logger.Info("access policy created", "policy", name)
-	}
-
-	// Delete stale rector-managed policies that are no longer desired.
-	for name, p := range existingByName {
-		if !strings.HasPrefix(name, "rector:") {
-			continue
-		}
-		if _, ok := desired[name]; ok {
-			continue
-		}
-		if err := c.api.DeleteAccessPolicy(ctx, cf.AccountIdentifier(accountID), cf.DeleteAccessPolicyParams{
-			ApplicationID: appID,
-			PolicyID:      p.ID,
-		}); err != nil && !isNotFound(err) {
-			return fmt.Errorf("deleting stale access policy %q: %w", name, err)
-		}
-		logger.Info("stale access policy deleted", "policy", name)
 	}
 
 	return nil
