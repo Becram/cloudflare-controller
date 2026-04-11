@@ -7,10 +7,70 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	cf "github.com/cloudflare/cloudflare-go"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// PolicySpec describes a single Access Policy to attach to an Access Application.
+// The Raw field is one entry from the cloudflare.rector.io/access-policies annotation,
+// e.g. "service-token", "email:user@example.com", "email-domain:example.com".
+type PolicySpec struct {
+	Raw string
+}
+
+// ParsePolicies splits the comma-separated access-policies annotation value into
+// PolicySpec entries. Blank entries are silently dropped.
+func ParsePolicies(annotation string) []PolicySpec {
+	annotation = strings.TrimSpace(annotation)
+	if annotation == "" {
+		return nil
+	}
+	parts := strings.Split(annotation, ",")
+	out := make([]PolicySpec, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, PolicySpec{Raw: p})
+		}
+	}
+	return out
+}
+
+// name returns the deterministic Cloudflare policy name for this spec.
+// The "rector:" prefix lets the controller distinguish managed policies from
+// manually created ones when syncing.
+func (p PolicySpec) name() string { return "rector:" + p.Raw }
+
+// decision returns the Cloudflare Access decision for this policy type.
+// Service-token policies use non_identity; all others use allow.
+func (p PolicySpec) decision() string {
+	if p.Raw == "service-token" {
+		return "non_identity"
+	}
+	return "allow"
+}
+
+// include returns the include rules slice for the policy, or nil if the spec
+// type is unrecognised.
+func (p PolicySpec) include() []interface{} {
+	switch {
+	case p.Raw == "service-token":
+		return []interface{}{
+			map[string]interface{}{"any_valid_service_token": map[string]interface{}{}},
+		}
+	case strings.HasPrefix(p.Raw, "email:"):
+		return []interface{}{
+			map[string]interface{}{"email": map[string]interface{}{"email": strings.TrimPrefix(p.Raw, "email:")}},
+		}
+	case strings.HasPrefix(p.Raw, "email-domain:"):
+		return []interface{}{
+			map[string]interface{}{"email_domain": map[string]interface{}{"domain": strings.TrimPrefix(p.Raw, "email-domain:")}},
+		}
+	default:
+		return nil
+	}
+}
 
 // Client is the interface used by the ServiceReconciler.
 // Defined as an interface to allow mocking in tests.
@@ -19,6 +79,10 @@ type Client interface {
 	DeleteDNSRecord(ctx context.Context, zoneID, recordID string) error
 	EnsureAccessApp(ctx context.Context, accountID, hostname string) (appID string, err error)
 	DeleteAccessApp(ctx context.Context, accountID, appID string) error
+	// SyncAccessPolicies reconciles the desired set of policies on the given Access
+	// Application. It creates missing policies, removes stale rector-managed ones,
+	// and leaves manually created (non-rector:) policies untouched.
+	SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error
 }
 
 type cfClient struct {
@@ -146,6 +210,71 @@ func (c *cfClient) DeleteAccessApp(ctx context.Context, accountID, appID string)
 		return fmt.Errorf("deleting access application %s: %w", appID, err)
 	}
 	logger.V(1).Info("access application deleted")
+	return nil
+}
+
+// SyncAccessPolicies reconciles the desired policies on an Access Application.
+// Policies are matched by name (prefix "rector:"). Missing ones are created,
+// stale managed ones are deleted; any non-rector: policies are left intact.
+func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error {
+	logger := log.FromContext(ctx).WithValues("accountID", accountID, "appID", appID)
+
+	existing, _, err := c.api.ListAccessPolicies(ctx, cf.AccountIdentifier(accountID), cf.ListAccessPoliciesParams{
+		ApplicationID: appID,
+	})
+	if err != nil {
+		return fmt.Errorf("listing access policies: %w", err)
+	}
+
+	existingByName := make(map[string]cf.AccessPolicy, len(existing))
+	for _, p := range existing {
+		existingByName[p.Name] = p
+	}
+
+	desired := make(map[string]PolicySpec, len(specs))
+	for _, s := range specs {
+		desired[s.name()] = s
+	}
+
+	// Create any missing desired policies.
+	for name, spec := range desired {
+		if _, ok := existingByName[name]; ok {
+			logger.V(1).Info("access policy already exists", "policy", name)
+			continue
+		}
+		include := spec.include()
+		if include == nil {
+			logger.Info("unrecognised access policy spec, skipping", "spec", spec.Raw)
+			continue
+		}
+		if _, err := c.api.CreateAccessPolicy(ctx, cf.AccountIdentifier(accountID), cf.CreateAccessPolicyParams{
+			ApplicationID: appID,
+			Name:          name,
+			Decision:      spec.decision(),
+			Include:       include,
+		}); err != nil {
+			return fmt.Errorf("creating access policy %q: %w", name, err)
+		}
+		logger.Info("access policy created", "policy", name)
+	}
+
+	// Delete stale rector-managed policies that are no longer desired.
+	for name, p := range existingByName {
+		if !strings.HasPrefix(name, "rector:") {
+			continue
+		}
+		if _, ok := desired[name]; ok {
+			continue
+		}
+		if err := c.api.DeleteAccessPolicy(ctx, cf.AccountIdentifier(accountID), cf.DeleteAccessPolicyParams{
+			ApplicationID: appID,
+			PolicyID:      p.ID,
+		}); err != nil && !isNotFound(err) {
+			return fmt.Errorf("deleting stale access policy %q: %w", name, err)
+		}
+		logger.Info("stale access policy deleted", "policy", name)
+	}
+
 	return nil
 }
 

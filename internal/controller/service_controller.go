@@ -26,6 +26,7 @@ const (
 	AnnotationHostname      = "cloudflare.rector.io/hostname"
 	AnnotationPort          = "cloudflare.rector.io/port"
 	AnnotationAccessEnabled = "cloudflare.rector.io/access-enabled"
+	AnnotationAccessPolicies = "cloudflare.rector.io/access-policies"
 	AnnotationDNSRecordID   = "cloudflare.rector.io/dns-record-id"
 	AnnotationAccessAppID   = "cloudflare.rector.io/access-app-id"
 	Finalizer               = "cloudflare.rector.io/finalizer"
@@ -140,11 +141,12 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// 3. Optionally create Cloudflare Access Application.
+	// 3. Optionally create Cloudflare Access Application and sync policies.
 	accessEnabled := svc.Annotations[AnnotationAccessEnabled] == "true"
 	logger.V(1).Info("access application", "enabled", accessEnabled)
 	if accessEnabled {
-		if err := r.reconcileAccessApp(ctx, svc, hostname); err != nil {
+		policies := cfc.ParsePolicies(svc.Annotations[AnnotationAccessPolicies])
+		if err := r.reconcileAccessApp(ctx, svc, hostname, policies); err != nil {
 			r.Recorder.Eventf(svc, corev1.EventTypeWarning, "AccessAppFailed", err.Error())
 			return ctrl.Result{}, err
 		}
@@ -179,23 +181,26 @@ func (r *ServiceReconciler) reconcileDNS(ctx context.Context, svc *corev1.Servic
 	return nil
 }
 
-// reconcileAccessApp ensures a Cloudflare Access Application exists for hostname
-// and stores the app ID in the Service annotation.
-func (r *ServiceReconciler) reconcileAccessApp(ctx context.Context, svc *corev1.Service, hostname string) error {
+// reconcileAccessApp ensures a Cloudflare Access Application exists for hostname,
+// stores the app ID in the Service annotation, and syncs the desired policies.
+func (r *ServiceReconciler) reconcileAccessApp(ctx context.Context, svc *corev1.Service, hostname string, policies []cfc.PolicySpec) error {
 	logger := log.FromContext(ctx)
 
-	if svc.Annotations[AnnotationAccessAppID] != "" {
-		return nil // already created
+	// Ensure the Access Application exists and record its ID.
+	if svc.Annotations[AnnotationAccessAppID] == "" {
+		id, err := r.CFClient.EnsureAccessApp(ctx, r.AccountID, hostname)
+		if err != nil {
+			return err
+		}
+		svc.Annotations[AnnotationAccessAppID] = id
+		logger.Info("Access Application ensured", "hostname", hostname, "appID", id)
+		r.Recorder.Eventf(svc, corev1.EventTypeNormal, "AccessAppCreated", "Cloudflare Access Application created for %s (id=%s)", hostname, id)
 	}
 
-	id, err := r.CFClient.EnsureAccessApp(ctx, r.AccountID, hostname)
-	if err != nil {
-		return err
-	}
-	svc.Annotations[AnnotationAccessAppID] = id
-	logger.Info("Access Application ensured", "hostname", hostname, "appID", id)
-	r.Recorder.Eventf(svc, corev1.EventTypeNormal, "AccessAppCreated", "Cloudflare Access Application created for %s (id=%s)", hostname, id)
-	return nil
+	// Always sync policies so annotation changes take effect on every reconcile.
+	appID := svc.Annotations[AnnotationAccessAppID]
+	logger.V(1).Info("syncing access policies", "appID", appID, "count", len(policies))
+	return r.CFClient.SyncAccessPolicies(ctx, r.AccountID, appID, policies)
 }
 
 // cleanup removes all Cloudflare resources that were created for this Service.
