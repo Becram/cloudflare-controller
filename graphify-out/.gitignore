@@ -1,0 +1,4 @@
+.graphify_python
+.graphify_chunk_*.json
+.graphify_*.json
+.needs_update

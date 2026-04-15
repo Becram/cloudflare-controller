@@ -1,0 +1,12 @@
+{
+  "cmd/main.go": 1775909500.7965007,
+  "internal/config/config.go": 1775909292.8981776,
+  "internal/cloudflare/client.go": 1775909524.0221155,
+  "internal/controller/service_controller.go": 1775913739.1103072,
+  "internal/cloudflared/infra.go": 1775921476.6148896,
+  "internal/configmap/manager.go": 1775921469.018987,
+  "CLAUDE.md": 1775909764.5653536,
+  "hack/boilerplate.go.txt": 1775909292.8972225,
+  "docs/ARCHITECTURE.md": 1775915482.167462,
+  "docs/README.md": 1775915323.2382152
+}
