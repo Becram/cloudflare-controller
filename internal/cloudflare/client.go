@@ -319,3 +319,16 @@ func isNotFound(err error) bool {
 	}
 	return false
 }
+
+// IsUnknownApplication returns true when the Cloudflare API returns error 11021
+// (access.api.error.unknown_application), meaning the Access Application ID is stale.
+func IsUnknownApplication(err error) bool {
+	if err == nil {
+		return false
+	}
+	var reqErr *cf.RequestError
+	if errors.As(err, &reqErr) {
+		return reqErr.InternalErrorCodeIs(11021)
+	}
+	return false
+}

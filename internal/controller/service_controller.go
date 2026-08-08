@@ -211,7 +211,15 @@ func (r *ServiceReconciler) reconcileAccessApp(ctx context.Context, svc *corev1.
 	// Always sync policies so annotation changes take effect on every reconcile.
 	appID := svc.Annotations[AnnotationAccessAppID]
 	logger.V(1).Info("syncing access policies", "appID", appID, "count", len(policies))
-	return r.CFClient.SyncAccessPolicies(ctx, r.AccountID, appID, policies)
+	err := r.CFClient.SyncAccessPolicies(ctx, r.AccountID, appID, policies)
+	if cfc.IsUnknownApplication(err) {
+		// Stale app ID — the application was deleted externally. Clear the annotation
+		// so the next reconcile recreates it.
+		logger.Info("Access Application not found in Cloudflare, clearing stale ID", "appID", appID)
+		svc.Annotations[AnnotationAccessAppID] = ""
+		return fmt.Errorf("stale access app ID cleared, will recreate on next reconcile: %w", err)
+	}
+	return err
 }
 
 // cleanup removes all Cloudflare resources that were created for this Service.
