@@ -43,18 +43,26 @@ func ParsePolicies(annotation string) []PolicySpec {
 func (p PolicySpec) name() string { return p.Raw }
 
 // decision returns the Cloudflare Access decision for this policy type.
-// Service-token policies use non_identity; all others use allow.
+// Service-token policies use non_identity; everyone uses bypass; all others use allow.
 func (p PolicySpec) decision() string {
-	if p.Raw == "service-token" {
+	switch p.Raw {
+	case "service-token":
 		return "non_identity"
+	case "everyone":
+		return "bypass"
+	default:
+		return "allow"
 	}
-	return "allow"
 }
 
 // include returns the include rules slice for the policy, or nil if the spec
 // type is unrecognised.
 func (p PolicySpec) include() []interface{} {
 	switch {
+	case p.Raw == "everyone":
+		return []interface{}{
+			map[string]interface{}{"everyone": map[string]interface{}{}},
+		}
 	case p.Raw == "service-token":
 		return []interface{}{
 			map[string]interface{}{"any_valid_service_token": map[string]interface{}{}},
@@ -77,8 +85,14 @@ func (p PolicySpec) include() []interface{} {
 type Client interface {
 	EnsureDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) (recordID string, err error)
 	DeleteDNSRecord(ctx context.Context, zoneID, recordID string) error
+	// FindDNSRecordByHostname returns the record ID of the CNAME for hostname, or "" if not found.
+	// Used as a fallback during cleanup when the stored record ID annotation is missing.
+	FindDNSRecordByHostname(ctx context.Context, zoneID, hostname string) (recordID string, err error)
 	EnsureAccessApp(ctx context.Context, accountID, hostname string) (appID string, err error)
 	DeleteAccessApp(ctx context.Context, accountID, appID string) error
+	// FindAccessAppByHostname returns the app ID of the Access Application for hostname, or "" if not found.
+	// Used as a fallback during cleanup when the stored app ID annotation is missing.
+	FindAccessAppByHostname(ctx context.Context, accountID, hostname string) (appID string, err error)
 	// SyncAccessPolicies ensures all desired policies exist on the Access Application,
 	// matching by name. Existing policies (including pre-created ones) are never deleted.
 	SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error
@@ -210,6 +224,35 @@ func (c *cfClient) DeleteAccessApp(ctx context.Context, accountID, appID string)
 	}
 	logger.V(1).Info("access application deleted")
 	return nil
+}
+
+// FindDNSRecordByHostname returns the CNAME record ID for hostname, or "" if not found.
+func (c *cfClient) FindDNSRecordByHostname(ctx context.Context, zoneID, hostname string) (string, error) {
+	records, _, err := c.api.ListDNSRecords(ctx, cf.ZoneIdentifier(zoneID), cf.ListDNSRecordsParams{
+		Type: "CNAME",
+		Name: hostname,
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing DNS records for %s: %w", hostname, err)
+	}
+	if len(records) == 0 {
+		return "", nil
+	}
+	return records[0].ID, nil
+}
+
+// FindAccessAppByHostname returns the Access Application ID for hostname, or "" if not found.
+func (c *cfClient) FindAccessAppByHostname(ctx context.Context, accountID, hostname string) (string, error) {
+	apps, _, err := c.api.ListAccessApplications(ctx, cf.AccountIdentifier(accountID), cf.ListAccessApplicationsParams{})
+	if err != nil {
+		return "", fmt.Errorf("listing access applications: %w", err)
+	}
+	for _, app := range apps {
+		if app.Domain == hostname {
+			return app.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // SyncAccessPolicies ensures all desired policies exist on the Access Application.
