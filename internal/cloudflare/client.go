@@ -255,10 +255,9 @@ func (c *cfClient) FindAccessAppByHostname(ctx context.Context, accountID, hostn
 	return "", nil
 }
 
-// SyncAccessPolicies ensures all desired policies exist on the Access Application.
-// Policies are matched by name (the spec raw value). Missing ones are created;
-// existing ones are left as-is. No policies are ever deleted — removal must be
-// done manually since the controller cannot distinguish owned from pre-existing policies.
+// SyncAccessPolicies checks that the desired policies exist on the Access Application
+// and logs any that are missing. Policies are never created or deleted by the controller —
+// they must be managed manually in Cloudflare Access.
 func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error {
 	logger := log.FromContext(ctx).WithValues("accountID", accountID, "appID", appID)
 
@@ -269,36 +268,18 @@ func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID stri
 		return fmt.Errorf("listing access policies: %w", err)
 	}
 
-	existingByName := make(map[string]cf.AccessPolicy, len(existing))
+	existingByName := make(map[string]struct{}, len(existing))
 	for _, p := range existing {
-		existingByName[p.Name] = p
+		existingByName[p.Name] = struct{}{}
 	}
 
-	desired := make(map[string]PolicySpec, len(specs))
-	for _, s := range specs {
-		desired[s.name()] = s
-	}
-
-	// Create any missing desired policies.
-	for name, spec := range desired {
+	for _, spec := range specs {
+		name := spec.name()
 		if _, ok := existingByName[name]; ok {
-			logger.V(1).Info("access policy already exists", "policy", name)
-			continue
+			logger.V(1).Info("access policy found", "policy", name)
+		} else {
+			logger.Info("access policy not found on app — add it manually in Cloudflare Access", "policy", name)
 		}
-		include := spec.include()
-		if include == nil {
-			logger.Info("unrecognised access policy spec, skipping", "spec", spec.Raw)
-			continue
-		}
-		if _, err := c.api.CreateAccessPolicy(ctx, cf.AccountIdentifier(accountID), cf.CreateAccessPolicyParams{
-			ApplicationID: appID,
-			Name:          name,
-			Decision:      spec.decision(),
-			Include:       include,
-		}); err != nil {
-			return fmt.Errorf("creating access policy %q: %w", name, err)
-		}
-		logger.Info("access policy created", "policy", name)
 	}
 
 	return nil
