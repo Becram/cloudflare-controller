@@ -326,9 +326,13 @@ func IsUnknownApplication(err error) bool {
 	if err == nil {
 		return false
 	}
-	var reqErr *cf.RequestError
+	var reqErr cf.RequestError
 	if errors.As(err, &reqErr) {
-		return reqErr.InternalErrorCodeIs(11021)
+		for _, code := range reqErr.ErrorCodes() {
+			if code == 11021 {
+				return true
+			}
+		}
 	}
 	return false
 }
