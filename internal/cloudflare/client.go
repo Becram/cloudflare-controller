@@ -255,11 +255,15 @@ func (c *cfClient) FindAccessAppByHostname(ctx context.Context, accountID, hostn
 	return "", nil
 }
 
-// SyncAccessPolicies checks that the desired policies exist on the Access Application
-// and logs any that are missing. Policies are never created or deleted by the controller —
-// they must be managed manually in Cloudflare Access.
+// SyncAccessPolicies checks that the desired policies exist on the Access Application.
+// If a policy from the annotation is already attached it is kept; missing ones are skipped silently.
+// Policies are never created or deleted by the controller.
 func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID string, specs []PolicySpec) error {
 	logger := log.FromContext(ctx).WithValues("accountID", accountID, "appID", appID)
+
+	if len(specs) == 0 {
+		return nil
+	}
 
 	existing, _, err := c.api.ListAccessPolicies(ctx, cf.AccountIdentifier(accountID), cf.ListAccessPoliciesParams{
 		ApplicationID: appID,
@@ -276,9 +280,9 @@ func (c *cfClient) SyncAccessPolicies(ctx context.Context, accountID, appID stri
 	for _, spec := range specs {
 		name := spec.name()
 		if _, ok := existingByName[name]; ok {
-			logger.V(1).Info("access policy found", "policy", name)
+			logger.V(1).Info("access policy attached", "policy", name)
 		} else {
-			logger.Info("access policy not found on app — add it manually in Cloudflare Access", "policy", name)
+			logger.V(1).Info("access policy not found on app, skipping", "policy", name)
 		}
 	}
 
